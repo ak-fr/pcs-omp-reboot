@@ -25,7 +25,7 @@ namespace mitm {
 
 /****************************** the interface's constants ******************************/
 
-/* router_role and ROUTER_GROUP_AUTO are defined in placement.hpp, which both this and RouterPlacement need */
+/* router_role is defined in placement.hpp, which both this and RouterPlacement need */
 
 /* Router_size's and Router_rank's `scope`: over every node of the team, or this node alone */
 enum router_scope { ROUTER_GLOBAL = 0, ROUTER_NODE = 1 };
@@ -46,9 +46,7 @@ struct Router_Opts {
 	int n_recv = 32;                    /* always-posted MPI_Irecv(ANY_SOURCE) slots, and as many send slots */
 	int inbox_blocks = 64;              /* a consumer's inbox, in blocks */
 	int credit = 4;                     /* blocks in flight to one peer at most: a stalled peer hogs no send slot */
-	bool pin = true;                    /* pin the threads and form the groups, or leave the CPUs to the caller */
-	int cache_level = 0;                /* the cache level a group sits in; 0 == the lowest shared by several cores */
-	int group_size = 16;                /* cores per group at most: the AUTO knob that splits a cache domain */
+	bool pin = true;                    /* pin the threads, or leave the CPUs to the caller */
 	bool verbose = true;                /* rank 0 prints the sizes once connected */
 };
 
@@ -144,7 +142,6 @@ struct alignas(64) Router_thread {
 	/* identity */
 	const int role;                      /* ROUTER_SERVICE, ROUTER_PRODUCER or ROUTER_CONSUMER */
 	const int index;                     /* among the threads of its role: a producer's or consumer's local rank */
-	const int group;                     /* a producer's or consumer's group; -1 for the service */
 	const int cpu;                       /* the CPU the kernel reports after pinning; momentary when not pinned */
 	Router_node &node;                   /* the node it belongs to */
 	/* a producer's cache of free blocks, zeroed already: what it installs at a seal, refilled off the free ring */
@@ -161,7 +158,7 @@ struct alignas(64) Router_thread {
 	/* both workers': the wait under way, which Router_Stats adds to a snapshot before its owner tallies it */
 	u64 wait_since = 0;                  /* wtime() in ns when the wait for the Router began, or the producer closed; 0 == none */
 
-	Router_thread(int role, int index, int group, int cpu, Router_node &rn);
+	Router_thread(int role, int index, int cpu, Router_node &rn);
 	~Router_thread();
 	Router_thread(const Router_thread &) = delete;
 	Router_thread &operator=(const Router_thread &) = delete;
@@ -193,9 +190,10 @@ public:
 	u32 n_blocks = 0;                    /* the pool */
 	size_t partial_cap = 0;              /* points per closing buffer: P * (swc_linesize - 1), whole cache lines */
 	std::vector<int> roles;              /* per OpenMP thread id, its role: what connect() counts */
-	std::vector<int> colors;             /* per thread, its group color, or ROUTER_GROUP_AUTO */
+	std::vector<int> producer_tid;       /* per producer, by index, its OpenMP thread id: what Router_closeness resolves */
+	std::vector<int> consumer_tid;       /* per consumer, by index, its OpenMP thread id */
 	std::vector<cpu_set_t> masks;        /* per thread, its own affinity mask: connect() unions them */
-	RouterPlacement plan;                /* the thread layout: the groups, the domains, the pinning */
+	RouterPlacement plan;                /* the thread layout: every thread's CPU, or none */
 	int misplaced = 0;                   /* threads the kernel did not pin as planned: Router_Init aborts if any */
 	std::vector<Router_thread *> producers;                     /* the P producers' objects (on their stacks), by index */
 	std::vector<Router_thread *> consumers;                   /* the C consumers' objects (on their stacks), by index */

@@ -324,25 +324,23 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 			role = ROUTER_SERVICE;
 		else if (tid <= R)
 			role = ROUTER_CONSUMER;
-		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, params.mpi_comm, ROUTER_TAG, &params.router);
+		Router_thread rt = Router_Init(role, params.mpi_comm, ROUTER_TAG, &params.router);
 		u64 *ctr = shared.tally[tid].ctr;
 		const int me = Router_rank(rt, ROUTER_NODE);           /* among this node's threads of my role */
 
 		/* every per-thread object is built here, once the Router has pinned its thread: first touch */
 		PcsDict dict(params.jbits, (role == ROUTER_CONSUMER) ? params.w_shard : 0);
 		std::vector<u8> hll;                        /* a walker's distinct-collision registers */
-		std::vector<int> recv_of;                   /* which dict thread each walker resolves for */
+		std::vector<int> consumer_of;               /* which dict thread each walker resolves for */
 		std::vector<int> n_walkers;                 /* ... and how many walkers each of them has */
 		std::vector<u64> records;                   /* thread 0: the nodes' records, from the Allgather */
 		std::vector<u64> stats;                     /* thread 0: the node's Router tallies for the round */
 		std::unique_ptr<Control> control;           /* thread 0: its end of the control channel */
 
 		if (role == ROUTER_CONSUMER) {
-			shared.group[me] = Router_group(rt);
 			shared.chan[me].q = std::make_unique<CollisionQueue>(params.coll_queue_capacity);
 		}
 		if (role == ROUTER_PRODUCER) {
-			shared.group[Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE) + me] = Router_group(rt);
 			hll.assign(HLL_REGISTERS, 0);
 			shared.hll[tid] = hll.data();
 		}
@@ -353,21 +351,21 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 			control->begin_round();
 		}
 
-		#pragma omp barrier    /* the groups, the queues and the registers are the team's to read now */
+		#pragma omp barrier    /* the queues and the registers are the team's to read now */
 
 		/*
-		 * Which dict thread this walker resolves for.  Every thread runs the same deterministic pass
-		 * over the published groups; thread 0 runs it to check that no shard was left without a walker,
+		 * Which dict thread this walker resolves for.  Every thread runs the same deterministic pass over
+		 * the Router's closeness; thread 0 runs it to check that no shard was left without a walker,
 		 * which would silently drop every collision it found.
 		 */
 		int chan = me;                 /* the channel this thread works: a dict thread's own, a walker's assigned */
 		if (role != ROUTER_CONSUMER) {
-			recv_of.assign(Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE), -1);
+			consumer_of.assign(Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE), -1);
 			n_walkers.assign(Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE), 0);
-			assign_consumers(rt, shared.group.data(), recv_of.data(), n_walkers.data());
+			assign_consumers(rt, consumer_of.data(), n_walkers.data());
 		}
 		if (role == ROUTER_PRODUCER)
-			chan = recv_of[me];
+			chan = consumer_of[me];
 		if (role == ROUTER_SERVICE) {
 			int lo = n_walkers[0];
 			int hi = n_walkers[0];
@@ -376,15 +374,13 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 				hi = std::max(hi, n_walkers[r]);
 			}
 			if (lo == 0) {
-				warnx("pcs: rank %d has a dictionary shard with no walker to resolve for it, so "
-				      "every collision it finds would be dropped.  Raise --producers-per-node, "
-				      "lower --dicts-per-node, or widen a Router group (--group, --cache-level)",
-				      Router_rank(rt, ROUTER_GLOBAL));
+				warnx("pcs: rank %d has a dictionary shard no walker is closest to, so every "
+				      "collision it finds would be dropped.  Raise --producers-per-node or lower "
+				      "--dicts-per-node", Router_rank(rt, ROUTER_GLOBAL));
 				MPI_Abort(params.mpi_comm, 1);
 			}
 			if (params.verbose)
-				print("PCS: {} to {} walker(s) per dictionary shard, {} group(s) on the node\n", lo,
-				      hi, Router_num_groups(rt));
+				print("PCS: {} to {} walker(s) per dictionary shard\n", lo, hi);
 		}
 
 		for (;;) {

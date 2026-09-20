@@ -39,10 +39,10 @@ static void router_usage()
 	printf("  --points N --rounds N            per producer per round; rounds\n");
 	printf("  --block N --swc N --n-recv N --inbox BLOCKS --credit N\n");
 	printf("  --skew K --stagger --partial --slow-recv --seed S\n");
-	printf("  --no-bind --cache-level L --group N     pinning (on by default); cores per group (default 16)\n");
+	printf("  --no-bind                        do not pin the threads (on by default)\n");
 	printf("  --seconds X --local-only               (bench)\n");
-	printf("  --test NAME                      (test) connect_only basic tiny rounds zero skew partial_lines\n");
-	printf("                                   swc_is_block staggered_close slow_recv groups colors\n");
+	printf("  --test NAME                      (test) placement connect_only basic tiny rounds zero skew\n");
+	printf("                                   partial_lines swc_is_block staggered_close slow_recv\n");
 	printf("                                   asymmetric limits all\n");
 	printf("  --quiet\n");
 	exit(EXIT_SUCCESS);
@@ -53,7 +53,7 @@ static void router_parse(int argc, char **argv, RouterArgs &a)
 	enum {
 		O_PRODUCERS = 1000, O_CONSUMERS, O_POINTS, O_ROUNDS, O_BLOCK, O_SWC, O_NRECV, O_INBOX,
 		O_CREDIT, O_SKEW, O_STAGGER, O_PARTIAL, O_SLOW,
-		O_SEED, O_SECONDS, O_NOBIND, O_CACHE, O_GROUP, O_LOCAL, O_TEST, O_QUIET, O_HELP
+		O_SEED, O_SECONDS, O_NOBIND, O_LOCAL, O_TEST, O_QUIET, O_HELP
 	};
 	struct option longopts[] = {
 		{"producers", required_argument, NULL, O_PRODUCERS}, {"consumers", required_argument, NULL, O_CONSUMERS},
@@ -65,8 +65,7 @@ static void router_parse(int argc, char **argv, RouterArgs &a)
 		{"stagger", no_argument, NULL, O_STAGGER}, {"partial", no_argument, NULL, O_PARTIAL},
 		{"slow-recv", no_argument, NULL, O_SLOW}, {"seed", required_argument, NULL, O_SEED},
 		{"seconds", required_argument, NULL, O_SECONDS},
-		{"no-bind", no_argument, NULL, O_NOBIND}, {"cache-level", required_argument, NULL, O_CACHE},
-		{"group", required_argument, NULL, O_GROUP},
+		{"no-bind", no_argument, NULL, O_NOBIND},
 		{"local-only", no_argument, NULL, O_LOCAL}, {"test", required_argument, NULL, O_TEST},
 		{"quiet", no_argument, NULL, O_QUIET}, {"help", no_argument, NULL, O_HELP},
 		{NULL, 0, NULL, 0}
@@ -91,8 +90,6 @@ static void router_parse(int argc, char **argv, RouterArgs &a)
 		case O_SEED: a.seed = strtoull(optarg, NULL, 0); break;
 		case O_SECONDS: a.seconds = atof(optarg); break;
 		case O_NOBIND: a.opts.pin = false; break;
-		case O_CACHE: a.opts.cache_level = atoi(optarg); break;
-		case O_GROUP: a.opts.group_size = atoi(optarg); break;
 		case O_LOCAL: a.local_only = true; break;
 		case O_TEST: a.test = optarg; break;
 		case O_QUIET: a.opts.verbose = false; break;

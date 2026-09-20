@@ -459,13 +459,13 @@ inline void Router_Dump(FILE *f, const Router_thread &rt)
 	        rn.free_list.size(), in - out, in, out, rn.out_free.size());
 	for (int s = 0; s < rn.P; s++) {
 		Router_thread &sd = *rn.producers[s];
-		fprintf(f, "  producer %d (grp %d cpu %d): closed %u pushed %" PRIu64 " cached %u\n", s,
-		        sd.group, sd.cpu, sd.closed.load(), sd.ctr[ROUTER_PUSHED], sd.cache_n);
+		fprintf(f, "  producer %d (cpu %d): closed %u pushed %" PRIu64 " cached %u\n", s,
+		        sd.cpu, sd.closed.load(), sd.ctr[ROUTER_PUSHED], sd.cache_n);
 	}
 	for (int r = 0; r < rn.C; r++) {
 		Router_thread &rr = *rn.consumers[r];
-		fprintf(f, "  consumer %d (grp %d cpu %d): inbox %zu/%zu cur %u (%u/%u) pushed %" PRIu64 " given back %"
-		        PRIu64 " parked %u\n", r, rr.group, rr.cpu, (size_t) rr.inbox.head.load(),
+		fprintf(f, "  consumer %d (cpu %d): inbox %zu/%zu cur %u (%u/%u) pushed %" PRIu64 " given back %"
+		        PRIu64 " parked %u\n", r, rr.cpu, (size_t) rr.inbox.head.load(),
 		        (size_t) rr.inbox.tail.load(), rr.cur_blk, rr.cur_off, rr.cur_count, rn.inbox_pushed[r],
 		        rr.ctr[ROUTER_BLOCKS], rn.park_head[r]);
 	}

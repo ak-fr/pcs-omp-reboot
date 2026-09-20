@@ -197,7 +197,7 @@ int main(int argc, char **argv)
 	{
 		int tid = omp_get_thread_num();
 		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_CONSUMER : ROUTER_PRODUCER);
-		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, MPI_COMM_WORLD, 42, &a.opts);
+		Router_thread rt = Router_Init(role, MPI_COMM_WORLD, 42, &a.opts);
 		if (role == ROUTER_PRODUCER)
 			bench_raw(rt, a);
 		#pragma omp barrier

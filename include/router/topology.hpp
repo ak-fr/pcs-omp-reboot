@@ -5,14 +5,15 @@
 #include <sched.h>
 #include <pthread.h>
 #include <cerrno>
-#include <algorithm>
+#include <cstdint>
 #include <vector>
 #include <hwloc.h>
+#include <hwloc/glibc-sched.h>
 
 /*
- * The hwloc primitives shared by the engine's placement and the Router's: pinning, the cache level a
- * thread group sits in, the NUMA node / cache domain / core of every CPU of a mask, the mask's cores by
- * domain, and the emptiest core of a set.  What a CPU is, and nothing about who runs on it.
+ * The Router's hwloc primitives: pinning, and the machine's hierarchy as the tree the placement descends.  The one
+ * file that includes hwloc: RouterTree names objects by a dense id and answers in ids, CPUs and depths, so nothing
+ * of hwloc's leaves it.
  */
 
 static_assert(HWLOC_API_VERSION >= 0x00020000, "hwloc 2.x is required (NUMA nodes as memory children)");
@@ -36,144 +37,123 @@ static inline int pin_to_cpu(int cpu)
 }
 
 /*
- * The lowest cache level shared by several CORES, which is what a thread group is built around; 0 when
- * every cache is private to one core.  Depths run from the machine down to the PUs, so walking them
- * backwards visits the caches from the smallest up and stops at the first shared one.
+ * The machine's hierarchy restricted to an affinity mask: the machine, then whatever hwloc reports as normal objects
+ * under it -- packages, groups, caches, cores -- down to the PUs, in child order.  NUMA nodes are memory children
+ * and never on a path; a PU's nodeset names its own.  Per object, the PUs under it the placement may use and the
+ * threads placed under it so far, which is what the descent compares.  Objects are named by a dense id, the root 0,
+ * a subtree contiguous after its root.
  */
-static inline int lowest_shared_cache_level(hwloc_topology_t topo)
-{
-	for (int depth = hwloc_topology_get_depth(topo) - 1; depth >= 0; depth--) {
-		hwloc_obj_t obj = hwloc_get_obj_by_depth(topo, depth, 0);
-		if (obj == NULL || not hwloc_obj_type_is_dcache(obj->type))
-			continue;
-		if (hwloc_get_nbobjs_inside_cpuset_by_type(topo, obj->cpuset, HWLOC_OBJ_CORE) > 1)
-			return (int) obj->attr->cache.depth;
-	}
-	return 0;
-}
+struct RouterTree {
+	hwloc_topology_t topo;             /* the loaded topology, restricted to the mask */
+	std::vector<hwloc_obj_t> obj;      /* by id */
+	std::vector<int> avail;            /* per object, the PUs under it the placement may use */
+	std::vector<int> placed;           /* per object, the threads placed under it so far */
 
-/*
- * NUMA node (hwloc os_index), cache domain and physical core (both a dense index, ascending) of every
- * CPU of `mask`, from one topology load; -1 outside the mask, or in no such object.  `level` is the
- * cache level that defines a domain, or 0 to take the lowest one shared by several cores; the level
- * used is returned.  The core map is what makes SMT siblings visible to the placement.
- * No topology flag on purpose: RESTRICT_TO_CPUBINDING would defeat the HWLOC_SYNTHETIC test path.
- */
-static inline int topology_of_cpus(const cpu_set_t &mask, int level, std::vector<int> &numa_node_of_cpu,
-                                   std::vector<int> &cache_of_cpu, std::vector<int> &core_of_cpu)
-{
-	numa_node_of_cpu.assign(CPU_SETSIZE, -1);
-	cache_of_cpu.assign(CPU_SETSIZE, -1);
-	core_of_cpu.assign(CPU_SETSIZE, -1);
-	hwloc_topology_t topo;
-	if (hwloc_topology_init(&topo) != 0)
-		err(1, "hwloc_topology_init");
-	if (hwloc_topology_load(topo) != 0)
-		err(1, "hwloc_topology_load");
-
-	hwloc_obj_t node = NULL;
-	while ((node = hwloc_get_next_obj_by_type(topo, HWLOC_OBJ_NUMANODE, node)) != NULL) {
-		unsigned cpu;
-		hwloc_bitmap_foreach_begin(cpu, node->cpuset)
-			if (cpu < CPU_SETSIZE && CPU_ISSET(cpu, &mask) && numa_node_of_cpu[cpu] < 0)
-				numa_node_of_cpu[cpu] = (int) node->os_index;
-		hwloc_bitmap_foreach_end();
+	/* load, restrict to the mask -- an object with no PU of it is gone --, number what is left */
+	RouterTree(const cpu_set_t &mask)
+	{
+		if (hwloc_topology_init(&topo) != 0)
+			err(1, "hwloc_topology_init");
+		if (hwloc_topology_load(topo) != 0)         /* no flag: RESTRICT_TO_CPUBINDING would defeat HWLOC_SYNTHETIC */
+			err(1, "hwloc_topology_load");
+		hwloc_cpuset_t set = hwloc_bitmap_alloc();
+		if (hwloc_cpuset_from_glibc_sched_affinity(topo, set, &mask, sizeof(mask)) != 0)
+			err(1, "hwloc_cpuset_from_glibc_sched_affinity");
+		if (hwloc_topology_restrict(topo, set, 0) != 0)
+			err(1, "hwloc_topology_restrict");
+		hwloc_bitmap_free(set);
+		number(hwloc_get_root_obj(topo));
 	}
 
-	hwloc_obj_t core = NULL;
-	int n_core = 0;
-	while ((core = hwloc_get_next_obj_by_type(topo, HWLOC_OBJ_CORE, core)) != NULL) {
-		bool used = false;
-		unsigned cpu;
-		hwloc_bitmap_foreach_begin(cpu, core->cpuset)
-			if (cpu < CPU_SETSIZE && CPU_ISSET(cpu, &mask) && core_of_cpu[cpu] < 0) {
-				core_of_cpu[cpu] = n_core;
-				used = true;
-			}
-		hwloc_bitmap_foreach_end();
-		if (used)
-			n_core += 1;
+	~RouterTree()
+	{
+		hwloc_topology_destroy(topo);
 	}
 
-	if (level == 0)
-		level = lowest_shared_cache_level(topo);
-	int id = 0;                        /* only domains holding a CPU of the mask are numbered */
-	for (int depth = hwloc_topology_get_depth(topo) - 1; level > 0 && depth >= 0; depth--) {
-		unsigned nobj = hwloc_get_nbobjs_by_depth(topo, depth);
-		for (unsigned k = 0; k < nobj; k++) {
-			hwloc_obj_t obj = hwloc_get_obj_by_depth(topo, depth, k);
-			if (not hwloc_obj_type_is_dcache(obj->type) || (int) obj->attr->cache.depth != level)
-				continue;
-			bool used = false;
-			unsigned cpu;
-			hwloc_bitmap_foreach_begin(cpu, obj->cpuset)
-				if (cpu < CPU_SETSIZE && CPU_ISSET(cpu, &mask) && cache_of_cpu[cpu] < 0) {
-					cache_of_cpu[cpu] = id;
-					used = true;
+	RouterTree(const RouterTree &) = delete;
+	RouterTree &operator=(const RouterTree &) = delete;
+
+	/* `o` and everything under it get their ids, depth first in child order.  Reached from the constructor. */
+	void number(hwloc_obj_t o)
+	{
+		o->userdata = (void *) (uintptr_t) obj.size();
+		obj.push_back(o);
+		avail.push_back(hwloc_bitmap_weight(o->cpuset));
+		placed.push_back(0);
+		for (unsigned k = 0; k < o->arity; k++)
+			number(o->children[k]);
+	}
+
+	/* the first PU in child order: the first core of the first package, the first NUMA node's */
+	int leftmost() const
+	{
+		hwloc_obj_t o = obj[0];
+		while (o->arity > 0)
+			o = o->children[0];
+		return (int) (uintptr_t) o->userdata;
+	}
+
+	/* the core holding PU `pu` (the PU itself when hwloc reports no core level) leaves the tree: nothing is placed
+	 * under it from now on, and no count sees its PUs.  Returns how many PUs went with it. */
+	int remove_core(int pu)
+	{
+		hwloc_obj_t core = obj[pu];
+		while (core->parent != NULL && core->type != HWLOC_OBJ_CORE)
+			core = core->parent;
+		if (core->type != HWLOC_OBJ_CORE)
+			core = obj[pu];
+		int n = avail[(int) (uintptr_t) core->userdata];
+		for (hwloc_obj_t o = core; o != NULL; o = o->parent)
+			avail[(int) (uintptr_t) o->userdata] -= n;
+		return n;
+	}
+
+	/*
+	 * One more thread: from the root, at every level the least-filled child -- placed over avail, ties to the
+	 * first -- among those with a PU left, down to a PU, whose id it returns; every object on the path counts one
+	 * more.  The root must have a PU left.
+	 */
+	int descend()
+	{
+		hwloc_obj_t o = obj[0];
+		while (o->arity > 0) {
+			hwloc_obj_t best = NULL;
+			int ib = -1;
+			for (unsigned k = 0; k < o->arity; k++) {
+				hwloc_obj_t c = o->children[k];
+				int ic = (int) (uintptr_t) c->userdata;
+				if (avail[ic] <= placed[ic])
+					continue;
+				if (best == NULL || (long) placed[ic] * avail[ib] < (long) placed[ib] * avail[ic]) {
+					best = c;
+					ib = ic;
 				}
-			hwloc_bitmap_foreach_end();
-			if (used)
-				id += 1;
+			}
+			if (best == NULL)
+				errx(1, "Router: the placement ran out of PUs");
+			o = best;
+		}
+		for (hwloc_obj_t a = o; a != NULL; a = a->parent)
+			placed[(int) (uintptr_t) a->userdata] += 1;
+		return (int) (uintptr_t) o->userdata;
+	}
+
+	/* what the placement records of PU `pu`: its CPU number, its core's id, its NUMA node, and its path -- the
+	 * logical index of its ancestor at every depth, the machine's first */
+	void locate(int pu, int *cpu, int *core, int *numa, std::vector<int> &path) const
+	{
+		hwloc_obj_t o = obj[pu];
+		*cpu = (int) o->os_index;
+		*numa = hwloc_bitmap_first(o->nodeset);
+		path.assign(o->depth + 1, -1);
+		*core = pu;
+		for (hwloc_obj_t a = o; a != NULL; a = a->parent) {
+			path[a->depth] = (int) a->logical_index;
+			if (a->type == HWLOC_OBJ_CORE)
+				*core = (int) (uintptr_t) a->userdata;
 		}
 	}
-	hwloc_topology_destroy(topo);
-	return (id > 0) ? level : 0;
-}
-
-/*
- * The mask's CPUs by dense core index, and the dense core indices by cache domain; one domain (0) when no
- * cache is shared.  Returns the number of domains.  `cache_of_cpu` and `core_of_cpu` are as topology_of_cpus
- * filled them; the per-core domain is used only to bin the cores and is not returned.
- */
-static inline int cores_by_domain(const cpu_set_t &mask, int cache_level, const std::vector<int> &cache_of_cpu,
-                                  const std::vector<int> &core_of_cpu,
-                                  std::vector<std::vector<int>> &core_cpus,
-                                  std::vector<std::vector<int>> &cache_cores)
-{
-	core_cpus.clear();
-	std::vector<int> core_cache;                /* cache domain of each core */
-	std::vector<int> dense(CPU_SETSIZE, -1);    /* hwloc's core index -> ours */
-	int n_caches = 0;
-	for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
-		if (!CPU_ISSET(cpu, &mask))
-			continue;
-		int c = (cache_level > 0) ? cache_of_cpu[cpu] : 0;
-		int hw = core_of_cpu[cpu];
-		if (hw < 0 || dense[hw] < 0) {      /* a core not seen yet, or a CPU hwloc puts in none */
-			if (hw >= 0)
-				dense[hw] = core_cpus.size();
-			core_cpus.push_back(std::vector<int>());
-			core_cache.push_back(c);
-		}
-		core_cpus[(hw >= 0) ? dense[hw] : (int) core_cpus.size() - 1].push_back(cpu);
-		n_caches = std::max(n_caches, c + 1);
-	}
-	cache_cores.assign(n_caches, std::vector<int>());
-	for (size_t k = 0; k < core_cpus.size(); k++)
-		cache_cores[core_cache[k]].push_back(k);
-	return n_caches;
-}
-
-/*
- * The group's emptiest core that still has a free CPU, or -1.  Handing every thread the emptiest core
- * is what puts the dict threads on cores of their own, and then fills the siblings they left with
- * producers: a producer is compute-bound and fills the issue slots a thread waiting on memory leaves idle,
- * whereas two waiting threads on one core would only slow each other down.  The service thread's core is
- * marked full as soon as it is placed, so it is never refilled.
- */
-static int emptiest_core(const std::vector<int> &cores, const std::vector<std::vector<int>> &core_cpus,
-                         const std::vector<size_t> &next_cpu)
-{
-	int best = -1;
-	for (size_t t = 0; t < cores.size(); t++) {
-		int k = cores[t];
-		if (next_cpu[k] == core_cpus[k].size())
-			continue;
-		if (best < 0 || next_cpu[k] < next_cpu[best])
-			best = k;
-	}
-	return best;
-}
+};
 
 }
 #endif

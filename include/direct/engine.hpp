@@ -288,7 +288,7 @@ optional<pair<u64, u64>> run(const Wrapper &wrapper, u64 nbytes_memory, const Op
 			role = ROUTER_SERVICE;
 		else if (tid <= R)
 			role = ROUTER_CONSUMER;
-		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, params.mpi_comm, ROUTER_TAG, &params.router);
+		Router_thread rt = Router_Init(role, params.mpi_comm, ROUTER_TAG, &params.router);
 		u64 *ctr = shared.tally[tid].ctr;
 
 		/* a dict thread's shard, mapped and zero-filled here: its own first touch.  Empty on the other roles */

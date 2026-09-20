@@ -11,10 +11,10 @@ namespace mitm {
  * Router_Init's last stage, and the constructor runs nowhere else.  Past the barrier the service may read every
  * object, and thread 0 prints the measured layout.
  */
-inline Router_thread::Router_thread(int role_, int index_, int group_, int cpu_, Router_node &rn)
+inline Router_thread::Router_thread(int role_, int index_, int cpu_, Router_node &rn)
 	: swc(role_ == ROUTER_PRODUCER ? (Point *) router_alloc((size_t) rn.F * rn.swc_linesize * sizeof(Point)) : NULL),
 	  swc_linesize(rn.swc_linesize), role(role_), index(index_),
-	  group(group_), cpu(cpu_), node(rn), closed(0),
+	  cpu(cpu_), node(rn), closed(0),
 	  inbox(role_ == ROUTER_CONSUMER ? (size_t) rn.opt.inbox_blocks : 0)
 {
 	if (role == ROUTER_PRODUCER) {
@@ -46,7 +46,6 @@ inline Router_node::Router_node(int n_threads, MPI_Comm mpi_comm, int tag_, cons
 	  input_closed(0)
 {
 	roles.assign(n_threads, -1);
-	colors.assign(n_threads, ROUTER_GROUP_AUTO);
 	masks.assign(n_threads, cpu_set_t());
 }
 
@@ -88,22 +87,27 @@ inline void Router_node::connect()
 	MPI_Comm_size(comm, &n_nodes);
 	P = 0;
 	C = 0;
+	producer_tid.clear();
+	consumer_tid.clear();
 	for (size_t t = 1; t < roles.size(); t++) {
-		if (roles[t] == ROUTER_PRODUCER)
+		if (roles[t] == ROUTER_PRODUCER) {
 			P += 1;
-		else
+			producer_tid.push_back((int) t);
+		} else {
 			C += 1;
+			consumer_tid.push_back((int) t);
+		}
 	}
 	if (P < 1 || C < 1)
 		errx(1, "Router: a node needs at least one producer and one consumer (P=%d, C=%d)", P, C);
 
 	/* every node must agree on the team's shape and on the options: a difference is fatal, and named */
-	const int N_AGREE = 10;
+	const int N_AGREE = 8;
 	const char *name[N_AGREE] = {"producers", "consumers", "block_points", "swc_linesize", "n_recv", "inbox_blocks",
-	                             "credit", "pin", "cache_level", "group_size"};
+	                             "credit", "pin"};
 	double mine[N_AGREE] = {(double) P, (double) C, (double) opt.block_points,
 							(double) opt.swc_linesize, (double) opt.n_recv, (double) opt.inbox_blocks,
-							(double) opt.credit, (double) opt.pin, (double) opt.cache_level, (double) opt.group_size};
+							(double) opt.credit, (double) opt.pin};
 	double lo[N_AGREE], hi[N_AGREE];
 	MPI_Allreduce(mine, lo, N_AGREE, MPI_DOUBLE, MPI_MIN, comm);
 	MPI_Allreduce(mine, hi, N_AGREE, MPI_DOUBLE, MPI_MAX, comm);
@@ -123,10 +127,6 @@ inline void Router_node::connect()
 		errx(1, "Router: block_points / swc_linesize must be <= %u", ROUTER_MAX_L);
 	if (opt.n_recv < 1 || opt.inbox_blocks < 1 || opt.credit < 1)
 		errx(1, "Router: n_recv, inbox_blocks and credit must be >= 1");
-	if (opt.group_size < 1)
-		errx(1, "Router: group_size must be >= 1");
-	if (opt.cache_level < 0)
-		errx(1, "Router: cache_level must be >= 0");
 
 	/* the union of the threads' own affinity masks: under OMP_PROC_BIND thread 0's alone would be one core */
 	int n_threads = (int) roles.size();
@@ -164,7 +164,7 @@ inline void Router_node::connect()
 		MPI_Comm_free(&host);
 	}
 
-	plan = RouterPlacement(umask, roles, colors, opt.pin, opt.cache_level, opt.group_size, rank);
+	plan = RouterPlacement(umask, roles, opt.pin, rank);
 	if (rank == 0 && opt.verbose)
 		plan.report();
 	if (opt.pin && plan.thread_cpu[0] >= 0 && pin_to_cpu(plan.thread_cpu[0]) < 0)
@@ -278,15 +278,13 @@ inline void Router_node::banner() const
 }
 
 /*
- * Collective over every thread of the team and every node, the same arguments on every thread except `group`,
- * a thread's own (ROUTER_GROUP_AUTO to let the Router form the groups, or a color in 0..G-1).  Thread 0 is the
- * service whatever `role` says.  Each thread records its role, its group and its own affinity mask; thread 0
+ * Collective over every thread of the team and every node, the same arguments on every thread but `role`.  Thread
+ * 0 is the service whatever `role` says.  Each thread records its role and its own affinity mask; thread 0
  * connects and builds the plan; then every thread pins itself, confirms the kernel obeyed, touches its slice of
  * the pool and builds its object, which every later call of this thread takes; the caller keeps it, named, for
  * the team's whole life.
  */
-[[nodiscard]] inline Router_thread Router_Init(int role, int group, MPI_Comm comm, int tag,
-                                               const Router_Opts *opts)
+[[nodiscard]] inline Router_thread Router_Init(int role, MPI_Comm comm, int tag, const Router_Opts *opts)
 {
 	int tid = omp_get_thread_num();
 	Router_node *rn = NULL;
@@ -298,7 +296,6 @@ inline void Router_node::banner() const
 		rn->roles[tid] = role;
 	else
 		errx(1, "Router_Init: role must be ROUTER_PRODUCER or ROUTER_CONSUMER");
-	rn->colors[tid] = (tid == 0) ? ROUTER_GROUP_AUTO : group;
 	if (sched_getaffinity(0, sizeof(cpu_set_t), &rn->masks[tid]) != 0)
 		err(1, "Router_Init: sched_getaffinity");
 	#pragma omp barrier
@@ -330,20 +327,29 @@ inline void Router_node::banner() const
 	for (int t = 0; t < tid; t++)
 		if (rn->roles[t] == mine)
 			index += 1;
-	return Router_thread(mine, index, rn->plan.thread_group[tid], (int) cpu,
-	                     *rn);   /* registers itself, then holds the team's last barrier */
+	return Router_thread(mine, index, (int) cpu, *rn);   /* registers itself, then holds the team's last barrier */
 }
 
-/* Producer or consumer.  Its group, 0..Router_num_groups(rt)-1; -1 for the service thread. */
-inline int Router_group(const Router_thread &rt)
+/*
+ * Any thread, about two threads of its node, each a (role, index): the depth of the deepest object of the
+ * machine's hierarchy holding both their CPUs, 0 the whole machine, larger closer, a thread with itself the
+ * deepest of all; 0 for every pair when the threads are not pinned.  Ordinal only: hwloc merges the levels a
+ * machine has one of, so no depth names a level.  The one thing the Router says about where it put the threads.
+ */
+inline int Router_closeness(const Router_thread &rt, int role_a, int a, int role_b, int b)
 {
-	return rt.group;
-}
-
-/* Any thread.  The groups this node was cut into. */
-inline int Router_num_groups(const Router_thread &rt)
-{
-	return rt.node.plan.n_groups;
+	const Router_node &rn = rt.node;
+	int ta = 0;
+	if (role_a == ROUTER_PRODUCER)
+		ta = rn.producer_tid[a];
+	else if (role_a == ROUTER_CONSUMER)
+		ta = rn.consumer_tid[a];
+	int tb = 0;
+	if (role_b == ROUTER_PRODUCER)
+		tb = rn.producer_tid[b];
+	else if (role_b == ROUTER_CONSUMER)
+		tb = rn.consumer_tid[b];
+	return rn.plan.closeness(ta, tb);
 }
 
 /* Any thread.  The threads of `role` on this node (ROUTER_NODE) or over every node (ROUTER_GLOBAL). */

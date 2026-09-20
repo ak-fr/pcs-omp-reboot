@@ -90,7 +90,7 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 	{
 		int tid = omp_get_thread_num();
 		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_CONSUMER : ROUTER_PRODUCER);
-		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, opts.mpi_comm, TAG, &opts.router);
+		Router_thread rt = Router_Init(role, opts.mpi_comm, TAG, &opts.router);
 
 		if (tid == 0)
 			t0 = wtime();

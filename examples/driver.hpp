@@ -47,8 +47,6 @@ static void usage(const char *argv0)
 	printf("  --producers-per-node W   default: fill the affinity mask\n");
 	printf("  --dicts-per-node I       dictionary shards per node, one thread each.  Default: 1\n");
 	printf("  --no-bind                do not let the Router pin the threads (needed for 2 ranks per host)\n");
-	printf("  --cache-level N          cache level a Router group sits in.  0 == auto.  Default: 0\n");
-	printf("  --group N                cores per Router group at most.  Default: 16\n");
 	printf("\n");
 	printf("  --block N        points per Router block, one block being one message.  Default: 4096\n");
 	printf("  --swc N          points a producer accumulates per destination.  0 == auto\n");
@@ -68,7 +66,7 @@ static void usage(const char *argv0)
 static void process_command_line_options(int argc, char **argv, Options &opts, Driver &drv)
 {
 	enum {OPT_ENGINE = 998, OPT_FILL = 999, OPT_BLOCK = 1000, OPT_SWC, OPT_NRECV, OPT_INBOX,
-	      OPT_CREDIT, OPT_GROUP, OPT_CACHE_LEVEL, OPT_NO_BIND, OPT_DP_LEN_BITS, OPT_BENCHMARK,
+	      OPT_CREDIT, OPT_NO_BIND, OPT_DP_LEN_BITS, OPT_BENCHMARK,
 	      OPT_QUIET, OPT_PREFETCH, OPT_HELP};
 
 	struct option longopts[] = {
@@ -90,8 +88,6 @@ static void process_command_line_options(int argc, char **argv, Options &opts, D
 		{"n-recv",             required_argument, NULL, OPT_NRECV},
 		{"inbox",              required_argument, NULL, OPT_INBOX},
 		{"credit",             required_argument, NULL, OPT_CREDIT},
-		{"group",              required_argument, NULL, OPT_GROUP},
-		{"cache-level",        required_argument, NULL, OPT_CACHE_LEVEL},
 		{"no-bind",            no_argument,       NULL, OPT_NO_BIND},
 		{"benchmark",          no_argument,       NULL, OPT_BENCHMARK},
 		{"quiet",              no_argument,       NULL, OPT_QUIET},
@@ -120,8 +116,6 @@ static void process_command_line_options(int argc, char **argv, Options &opts, D
 		case OPT_NRECV:          opts.router.n_recv = std::stoi(optarg);      break;
 		case OPT_INBOX:          opts.router.inbox_blocks = std::stoi(optarg); break;
 		case OPT_CREDIT:         opts.router.credit = std::stoi(optarg);      break;
-		case OPT_GROUP:          opts.router.group_size = std::stoi(optarg);  break;
-		case OPT_CACHE_LEVEL:    opts.router.cache_level = std::stoi(optarg); break;
 		case OPT_DP_LEN_BITS:    opts.dp_lenbits = std::stoi(optarg);         break;
 		case OPT_NO_BIND:        opts.router.pin = false;                     break;
 		case OPT_BENCHMARK:      drv.benchmark = true;                        break;
