@@ -282,7 +282,7 @@ struct PlacementCase {
 	const char *machine;             /* the machine, as HWLOC_SYNTHETIC spells it: PUs numbered core by core */
 	int cpu_lo;                      /* the mask: PUs cpu_lo .. cpu_hi - 1, whole NUMA nodes of equal size or part of one */
 	int cpu_hi;
-	int n_numa;                      /* NUMA nodes the mask spans */
+	int n_numa;                      /* NUMA nodes the mask spans, whatever their numbers */
 	int pu_per_core;
 	int producers;                   /* the team, besides the one service thread */
 	int consumers;
@@ -299,6 +299,8 @@ static const PlacementCase PLACEMENT_CASES[] = {
 	{"node:2 l3:1 core:16 pu:2",   0,  64, 2, 2,  10,  21, 0},   /* the measured direct team: one thread per core */
 	{"node:2 l3:1 core:16 pu:2",   0,  64, 2, 2,  36,  25, 0},   /* the measured PCS teams */
 	{"node:2 l3:1 core:16 pu:2",   0,  64, 2, 2,  57,   4, 0},
+	{"node:2 l3:1 core:16 pu:2",  32,  64, 1, 2,   8,  22, 0},   /* grvingt, a rank per socket: the second one's mask */
+	{"node:2 l3:1 core:16 pu:2",  32,  64, 1, 2,  22,   8, 0},
 	{"node:2 l3:16 core:16 pu:1",  0, 512, 2, 1, 128, 383, 0},   /* grdix as 32 L3 caches of 16 cores */
 	{"node:2 l3:16 core:16 pu:1",  0, 512, 2, 1, 337, 174, 0},
 	{"node:2 l3:16 core:16 pu:1",  0, 512, 2, 1, 400, 110, 0},
@@ -309,6 +311,7 @@ static const PlacementCase PLACEMENT_CASES[] = {
 	{"node:1 l3:4 core:4 pu:1",    0,  16, 1, 1,   4,   3, 2},   /* a laptop-like tree: an L3 holds a walker and no shard */
 	{"node:1 l3:4 core:4 pu:1",    0,  16, 1, 1,  10,   5, 0},
 	{"node:1 l3:4 core:4 pu:1",    0,  16, 1, 1,   3,   3, 1},   /* the team the old placer refused */
+	{"node:1 pu:8",                0,   8, 1, 1,   4,   3, 0},   /* no core level at all: the service's PU is its core */
 };
 
 /* the depth of the L3 level of the machine HWLOC_SYNTHETIC names, or 0 when hwloc merged it into the machine */
@@ -339,14 +342,20 @@ static void check_plan(const RouterPlacement &p, const PlacementCase &c)
 		return;
 
 	std::vector<int> per_cpu(n_cpu, 0);
+	std::vector<int> numa_ids;                            /* the NUMA nodes the threads landed on, whatever their numbers */
 	for (int t = 0; t < nt; t++) {
 		CHECK(p.thread_cpu[t] >= c.cpu_lo && p.thread_cpu[t] < c.cpu_hi);
 		if (p.thread_cpu[t] < c.cpu_lo || p.thread_cpu[t] >= c.cpu_hi)
 			return;
 		per_cpu[p.thread_cpu[t] - c.cpu_lo] += 1;
 		CHECK(p.thread_core[t] >= 0);
-		CHECK(p.thread_numa[t] >= 0 && p.thread_numa[t] < c.n_numa);
+		CHECK(p.thread_numa[t] >= 0);
+		if (std::find(numa_ids.begin(), numa_ids.end(), p.thread_numa[t]) == numa_ids.end())
+			numa_ids.push_back(p.thread_numa[t]);
 	}
+	CHECK((int) numa_ids.size() == c.n_numa);
+	if ((int) numa_ids.size() != c.n_numa)
+		return;
 	for (int cpu = 0; cpu < n_cpu; cpu++)
 		CHECK(per_cpu[cpu] <= 1);
 	CHECK(p.thread_cpu[0] == c.cpu_lo);                   /* the leftmost core, its first PU */
@@ -369,9 +378,9 @@ static void check_plan(const RouterPlacement &p, const PlacementCase &c)
 		std::vector<int> cnt(c.n_numa, 0);
 		for (int t = 1; t < nt; t++)
 			if (p.thread_role[t] == role)
-				cnt[p.thread_numa[t]] += 1;
+				cnt[std::find(numa_ids.begin(), numa_ids.end(), p.thread_numa[t]) - numa_ids.begin()] += 1;
 		for (int j = 0; j < c.n_numa; j++) {
-			int node_avail = n_cpu / c.n_numa - (j == p.thread_numa[0] ? c.pu_per_core : 0);
+			int node_avail = n_cpu / c.n_numa - (numa_ids[j] == p.thread_numa[0] ? c.pu_per_core : 0);
 			int expect = (int) ((2.0 * node_avail * n_role / avail + 1) / 2);
 			CHECK(std::abs(cnt[j] - expect) <= 1);
 		}
@@ -429,16 +438,21 @@ static void report_plan(const RouterPlacement &p, const PlacementCase &c)
 {
 	printf("== placement (%s, CPUs %d-%d, %d producers, %d consumers): service on CPU %d;", c.machine, c.cpu_lo,
 	       c.cpu_hi - 1, c.producers, c.consumers, p.thread_cpu[0]);
-	for (int j = 0; j < p.n_numa_nodes; j++) {
+	std::vector<int> ids;                                 /* the NUMA nodes, as numbered, in order of first use */
+	for (int t = 0; t < p.n_threads; t++)
+		if (std::find(ids.begin(), ids.end(), p.thread_numa[t]) == ids.end())
+			ids.push_back(p.thread_numa[t]);
+	std::sort(ids.begin(), ids.end());
+	for (size_t j = 0; j < ids.size(); j++) {
 		int np = 0;
 		int nc = 0;
 		for (int t = 1; t < p.n_threads; t++) {
-			if (p.thread_numa[t] != j)
+			if (p.thread_numa[t] != ids[j])
 				continue;
 			np += p.thread_role[t] == ROUTER_PRODUCER;
 			nc += p.thread_role[t] == ROUTER_CONSUMER;
 		}
-		printf("  NUMA %d: %dp %dc", j, np, nc);
+		printf("  NUMA %d: %dp %dc", ids[j], np, nc);
 	}
 	printf(";  %d shared core(s)\n", p.n_shared_cores);
 }

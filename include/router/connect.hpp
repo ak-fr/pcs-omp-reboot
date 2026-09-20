@@ -335,6 +335,7 @@ inline void Router_node::banner() const
  * machine's hierarchy holding both their CPUs, 0 the whole machine, larger closer, a thread with itself the
  * deepest of all; 0 for every pair when the threads are not pinned.  Ordinal only: hwloc merges the levels a
  * machine has one of, so no depth names a level.  The one thing the Router says about where it put the threads.
+ * The indices are the caller's to keep in range, as for Router_size.
  */
 inline int Router_closeness(const Router_thread &rt, int role_a, int a, int role_b, int b)
 {

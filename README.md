@@ -26,7 +26,11 @@ to reach it; it is Monte-Carlo, so "not found" is never a proof.
 
 The **Router** (`include/router/`) is the transport
 underneath both engines: it carries pairs of `u64` from producer threads to globally
-numbered consumer threads across ranks, and it owns thread placement.
+numbered consumer threads across ranks, and it owns thread placement: the service thread alone on
+the leftmost core, then every consumer and every producer down hwloc's hierarchy to the least-filled
+child at each level.  It forms no groups; the one thing it says about its plan is `Router_closeness`,
+how deep in the hierarchy two threads sit together, which is what PCS pairs its walkers with its dict
+threads by.
 
 ## Build
 
