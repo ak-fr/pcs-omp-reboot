@@ -10,7 +10,7 @@ namespace mitm {
 
 /******************************** the ring ********************************/
 
-/* what a receiver's inbox carries: a block id and how many points are valid in it. */
+/* what a consumer's inbox carries: a block id and how many points are valid in it. */
 struct RouterBlockMsg {
 	u32 blk;                            /* block id, or ROUTER_NONE */
 	u32 count;                          /* points valid in it */
@@ -20,7 +20,7 @@ struct RouterBlockMsg {
  * Lamport's single-producer / single-consumer ring of block messages: no
  * mutex, no CAS, each side owns one index and caches the other's.  Capacity rounds up to a
  * power of two.  Three cache lines: the consumer's, the producer's, and a read-only one for the geometry.
- * A receiver's inbox is one.
+ * A consumer's inbox is one.
  */
 class RouterRing {
 public:

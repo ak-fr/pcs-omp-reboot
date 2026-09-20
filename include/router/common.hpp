@@ -44,7 +44,7 @@ struct Router_Opts {
 	size_t block_points = 16384;        /* points per block, a power of two >= 4: one block is one message */
 	size_t swc_linesize = 0;            /* points per private write-combining line, 4..block_points; 0 == auto */
 	int n_recv = 32;                    /* always-posted MPI_Irecv(ANY_SOURCE) slots, and as many send slots */
-	int inbox_blocks = 64;              /* a receiver's inbox, in blocks */
+	int inbox_blocks = 64;              /* a consumer's inbox, in blocks */
 	int credit = 4;                     /* blocks in flight to one peer at most: a stalled peer hogs no send slot */
 	bool pin = true;                    /* pin the threads and form the groups, or leave the CPUs to the caller */
 	int cache_level = 0;                /* the cache level a group sits in; 0 == the lowest shared by several cores */
@@ -62,7 +62,7 @@ static constexpr u32 ROUTER_NONE = 0xffffffffu;   /* "no block": an empty list, 
 static constexpr size_t ROUTER_HDR_BYTES = 64;    /* a block's header slot: the message header, one cache line */
 static constexpr size_t ROUTER_DEST_WORDS = 8;    /* u64 words per destination: its two words fill one cache line */
 static constexpr u32 ROUTER_MAX_L = 4096;         /* lines per block at most */
-static constexpr u32 ROUTER_BATCH = 32;           /* blocks off the free ring at a time: a sender's cache, the stash */
+static constexpr u32 ROUTER_BATCH = 32;           /* blocks off the free ring at a time: a producer's cache, the stash */
 static constexpr double ROUTER_WAIT_THRESHOLD = 0.05;   /* Router_Bottleneck: a role waiting less of the round is not waiting */
 
 enum router_kind { ROUTER_DATA = 0, ROUTER_END = 1 };
@@ -70,9 +70,9 @@ enum router_kind { ROUTER_DATA = 0, ROUTER_END = 1 };
 /* every message starts with this, in the block's header slot; a DATA message continues with `count` points */
 struct RouterMsgHdr {
 	u32 kind;             /* ROUTER_DATA or ROUTER_END */
-	u32 round;            /* the sender's round: an assertion, never a decision */
+	u32 round;            /* the producer's round: an assertion, never a decision */
 	u64 seq;              /* DATA: index of this message to this node; END: how many DATA messages went */
-	u32 dest;             /* DATA: the receiver's local index on the target node */
+	u32 dest;             /* DATA: the consumer's local index on the target node */
 	u32 count;            /* DATA: points that follow */
 	u64 pad;              /* to 32 bytes */
 };
@@ -126,40 +126,40 @@ class Router_node;
 /*
  * A thread's object, the caller's own: Router_Init builds it in place on the thread's stack (its first touch)
  * and the caller keeps it for the team's whole life; what its calls read, with no lookup and no indirection.
- * Thread 0's owns the node.  A sender's fields are unused by a receiver and vice versa; the constructor knows
- * what to build.  A sender's private line keeps its own count in its last u64: with n < swc_linesize points in
+ * Thread 0's owns the node.  A producer's fields are unused by a consumer and vice versa; the constructor knows
+ * what to build.  A producer's private line keeps its own count in its last u64: with n < swc_linesize points in
  * slots 0..n-1 that word is n, and the push that completes the line overwrites it with the last point's val, n
  * being in a register by then.  The first cache line of the object is all a push that does not stage touches.
- * A sender also holds a cache of free blocks, zeroed in advance: the block it installs when it seals comes out
- * of it, so the install the other senders of that destination wait on is one load and one store, and the free
- * ring sees the sender once in ROUTER_BATCH seals, after the seal, when nobody waits on it.
- * A receiver holds whole blocks: its inbox names them, Router_Pop reads them in place one after the other and
+ * A producer also holds a cache of free blocks, zeroed in advance: the block it installs when it seals comes out
+ * of it, so the install the other producers of that destination wait on is one load and one store, and the free
+ * ring sees the producer once in ROUTER_BATCH seals, after the seal, when nobody waits on it.
+ * A consumer holds whole blocks: its inbox names them, Router_Pop reads them in place one after the other and
  * pushes each onto the node's free ring once read through.
  */
 struct alignas(64) Router_thread {
 	/* the push's fast path */
-	Point *swc;                          /* a sender's F private lines of swc_linesize points, 64-byte aligned */
+	Point *swc;                          /* a producer's F private lines of swc_linesize points, 64-byte aligned */
 	const size_t swc_linesize;           /* the node's, copied: a push that does not stage never reads the node */
-	u64 ctr[ROUTER_STATS_SIZE] = {};     /* a sender's PUSHED and WAIT_SEND, a receiver's POPPED, BLOCKS and WAIT_RECV; plain */
+	u64 ctr[ROUTER_STATS_SIZE] = {};     /* a producer's PUSHED and WAIT_SEND, a consumer's POPPED, BLOCKS and WAIT_RECV; plain */
 	/* identity */
-	const int role;                      /* ROUTER_SERVICE, ROUTER_SENDER or ROUTER_RECEIVER */
-	const int index;                     /* among the threads of its role: a sender's or receiver's local rank */
-	const int group;                     /* a sender's or receiver's group; -1 for the service */
+	const int role;                      /* ROUTER_SERVICE, ROUTER_PRODUCER or ROUTER_CONSUMER */
+	const int index;                     /* among the threads of its role: a producer's or consumer's local rank */
+	const int group;                     /* a producer's or consumer's group; -1 for the service */
 	const int cpu;                       /* the CPU the kernel reports after pinning; momentary when not pinned */
 	Router_node &node;                   /* the node it belongs to */
-	/* a sender's cache of free blocks, zeroed already: what it installs at a seal, refilled off the free ring */
+	/* a producer's cache of free blocks, zeroed already: what it installs at a seal, refilled off the free ring */
 	u32 cache[ROUTER_BATCH];             /* the blocks, cache_n of them, the next to install last */
 	u32 cache_n = 0;                     /* how many */
-	/* a sender's flag, on a line of its own: the service reads it every turn */
+	/* a producer's flag, on a line of its own: the service reads it every turn */
 	alignas(64) Atomic<u32> closed; /* release-stored by Router_Close, acquired by the service */
-	/* a receiver's */
+	/* a consumer's */
 	RouterRing inbox;                    /* from the service: (block, count), blocks it now holds */
 	u32 cur_blk = ROUTER_NONE;           /* the block being read: taken off the inbox, not yet read through; NONE when none */
 	const u64 *cur_pts = NULL;           /* its points, in block memory, two words each: key then val */
 	u32 cur_count = 0;                   /* how many */
 	u32 cur_off = 0;                     /* Router_Pop's cursor into it */
 	/* both workers': the wait under way, which Router_Stats adds to a snapshot before its owner tallies it */
-	u64 wait_since = 0;                  /* wtime() in ns when the wait for the Router began, or the sender closed; 0 == none */
+	u64 wait_since = 0;                  /* wtime() in ns when the wait for the Router began, or the producer closed; 0 == none */
 
 	Router_thread(int role, int index, int group, int cpu, Router_node &rn);
 	~Router_thread();
@@ -183,22 +183,22 @@ public:
 	Router_Opts opt;                     /* as agreed with the other nodes */
 
 	/* fixed at connection */
-	int S = 0;                           /* senders per node */
-	int R = 0;                           /* receivers per node */
-	int F = 0;                           /* destinations: R * n_nodes, a destination being a receiver's global id */
+	int P = 0;                           /* producers per node */
+	int C = 0;                           /* consumers per node */
+	int F = 0;                           /* destinations: C * n_nodes, a destination being a consumer's global id */
 	size_t swc_linesize = 0;             /* points per private line, resolved from the fan-out */
 	u32 L = 0;                           /* lines per block */
 	u32 nv_stride = 0;                   /* bytes of n_valid per block: L rounded up to a cache line */
 	size_t block_bytes = 0;              /* a block: the header slot then block_points points; the longest message */
 	u32 n_blocks = 0;                    /* the pool */
-	size_t partial_cap = 0;              /* points per closing buffer: S * (swc_linesize - 1), whole cache lines */
+	size_t partial_cap = 0;              /* points per closing buffer: P * (swc_linesize - 1), whole cache lines */
 	std::vector<int> roles;              /* per OpenMP thread id, its role: what connect() counts */
 	std::vector<int> colors;             /* per thread, its group color, or ROUTER_GROUP_AUTO */
 	std::vector<cpu_set_t> masks;        /* per thread, its own affinity mask: connect() unions them */
 	RouterPlacement plan;                /* the thread layout: the groups, the domains, the pinning */
 	int misplaced = 0;                   /* threads the kernel did not pin as planned: Router_Init aborts if any */
-	std::vector<Router_thread *> senders;                     /* the S senders' objects (on their stacks), by index */
-	std::vector<Router_thread *> receivers;                   /* the R receivers' objects (on their stacks), by index */
+	std::vector<Router_thread *> producers;                     /* the P producers' objects (on their stacks), by index */
+	std::vector<Router_thread *> consumers;                   /* the C consumers' objects (on their stacks), by index */
 	/* a destination's line, alone on a cache line.  Word 0: (lines reserved << 32) | block id, the counter in the
 	 * high word so that a runaway counter carries out of the word, not into the block id.  Word 1: the points in
 	 * its closing buffer, a closer's fetch_add taking its offset. */
@@ -227,9 +227,9 @@ public:
 	std::vector<u32> free_list;          /* its stash: its own frees, for its own needs; a batch to or from the ring */
 	std::vector<u64> pending;            /* popped blocks with a line still being written: dest << 32 | blk */
 	std::vector<u32> blk_count;          /* per block: its points, while parked */
-	std::vector<u32> park_head;          /* per receiver, then per peer: the parked FIFOs */
+	std::vector<u32> park_head;          /* per consumer, then per peer: the parked FIFOs */
 	std::vector<u32> park_tail;          /* their last blocks */
-	std::vector<u64> inbox_pushed;       /* per receiver: blocks handed to it this round */
+	std::vector<u64> inbox_pushed;       /* per consumer: blocks handed to it this round */
 
 	std::vector<MPI_Request> out_req;    /* n_recv send slots, MPI_REQUEST_NULL when free */
 	std::vector<u32> out_blk;            /* per slot: the block in flight */
@@ -258,7 +258,7 @@ public:
 	bool flush_install = false;          /* that block went: a fresh one has to be installed */
 	u32 flush_len = 0;                   /* points in its closing buffer */
 	u32 flush_off = 0;                   /* of which delivered */
-	Atomic<u32> input_closed;             /* nothing can enter an inbox any more; receivers acquire it */
+	Atomic<u32> input_closed;             /* nothing can enter an inbox any more; consumers acquire it */
 	bool quiescent = false;              /* what Router_Test_quiescent returns */
 
 	Router_node(int n_threads, MPI_Comm mpi_comm, int tag, const Router_Opts *options);
@@ -271,18 +271,18 @@ public:
 	void touch_pool(int tid, int n_threads);
 	void banner() const;
 
-	/* the free ring: any thread.  A receiver pushes the block it read through, a sender's cache takes a batch,
+	/* the free ring: any thread.  A consumer pushes the block it read through, a producer's cache takes a batch,
 	 * the stash trades them */
 	void free_push(const u32 *blks, u32 n);
 	u32 free_pop_many(u32 k, u32 *out, u32 floor);
 
-	/* the sender path: Router_Push, by the push that fills a private line; refill also from Router_Init */
+	/* the producer path: Router_Push, by the push that fills a private line; refill also from Router_Init */
 	void stage_line(Router_thread &s, int d, const Point *line);
 	void refill(Router_thread &s);
 	void zero_valid(u32 blk);
 	void seal(int d, u32 blk);
 
-	/* the receiver path: Router_Pop, by the pop that finds no block being read and by the one that reads its last point */
+	/* the consumer path: Router_Pop, by the pop that finds no block being read and by the one that reads its last point */
 	bool grab(Router_thread &r);
 	void release(Router_thread &r);
 

@@ -112,7 +112,7 @@ static void display(const Router_thread &rt, const Params &params, const Shared 
 	double busy;                           /* share the service spent in turns that moved something */
 	const char *limit = Router_Bottleneck(stats, rt, &send_wait, &recv_wait, &busy);
 	print("\rRound {}/{} {}:  {:.1f}s ({:.1f}%, ETA {:.1f}s).  {} points routed/s.  node-->{}B/s.  "
-	      "wait: senders {:5.1f}% receivers {:5.1f}%, service {:5.1f}% busy --> {:<15}   ",
+	      "wait: producers {:5.1f}% consumers {:5.1f}%, service {:5.1f}% busy --> {:<15}   ",
 	      round, params.n_rounds, (phase == FILL) ? "FILL" : "PROBE", delta, 100. * completion,
 	      (completion > 0) ? delta * (1 - completion) / completion : 0.,
 	      human_format((double) retired * nodes / delta),
@@ -137,7 +137,7 @@ static void round_report(const Router_thread &rt, const Params &params, const u6
 	double recv_wait;                      /* share the dict threads had nothing to pop */
 	double busy;                           /* share the service spent in turns that moved something */
 	const char *limit = Router_Bottleneck(r + REC_ROUTER, rt, &send_wait, &recv_wait, &busy);
-	print("            LIMITED BY {}:  senders waited {:.1f}% of the phase, receivers {:.1f}%, the service was "
+	print("            LIMITED BY {}:  producers waited {:.1f}% of the phase, consumers {:.1f}%, the service was "
 	      "busy {:.1f}%\n", limit, 100. * send_wait, 100. * recv_wait, 100. * busy);
 	if (r[N_INSERT] > 0)
 		print("            {} inserted, load {:.2f}/slot\n", r[N_INSERT], (double) r[N_INSERT] / params.w);
@@ -186,7 +186,7 @@ static void service_round(Router_thread &rt, const Params &params, const Shared 
 		Router_Progress(rt);
 		turns += 1;
 		if (pending) {
-			if (shared.pages_ready.load_acquire() < (u32) Router_size(rt, ROUTER_RECEIVER, ROUTER_NODE))
+			if (shared.pages_ready.load_acquire() < (u32) Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE))
 				continue;              /* no live line over a shard still being mapped and touched */
 			shard_report(shared);
 			pending = false;
@@ -283,17 +283,17 @@ optional<pair<u64, u64>> run(const Wrapper &wrapper, u64 nbytes_memory, const Op
 	#pragma omp parallel num_threads(n_threads)
 	{
 		int tid = omp_get_thread_num();
-		int role = ROUTER_SENDER;
+		int role = ROUTER_PRODUCER;
 		if (tid == 0)
 			role = ROUTER_SERVICE;
 		else if (tid <= R)
-			role = ROUTER_RECEIVER;
+			role = ROUTER_CONSUMER;
 		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, params.mpi_comm, ROUTER_TAG, &params.router);
 		u64 *ctr = shared.tally[tid].ctr;
 
 		/* a dict thread's shard, mapped and zero-filled here: its own first touch.  Empty on the other roles */
-		DirectDict dict(role == ROUTER_RECEIVER ? params.w_shard : 0, params.n);
-		if (role == ROUTER_RECEIVER)
+		DirectDict dict(role == ROUTER_CONSUMER ? params.w_shard : 0, params.n);
+		if (role == ROUTER_CONSUMER)
 			shared.publish_pages(Router_rank(rt, ROUTER_NODE), dict.nbytes, dict.huge, dict.hugetlb_errno);
 
 		std::vector<u64> records;              /* thread 0: the nodes' records, from the Allgather */
@@ -314,7 +314,7 @@ optional<pair<u64, u64>> run(const Wrapper &wrapper, u64 nbytes_memory, const Op
 
 			if (role == ROUTER_SERVICE)
 				service_round(rt, params, shared, stats.data(), round, phase, t0);
-			else if (role == ROUTER_RECEIVER)
+			else if (role == ROUTER_CONSUMER)
 				dict_round(rt, wrapper, shared, dict, ctr, round, phase, params.prefetch);
 			else
 				producer_round(rt, wrapper, params, ctr, round, phase);

@@ -11,12 +11,12 @@ namespace mitm::direct {
 
 /******************************** the producer thread ********************************/
 
-/* push every image as(murmur64(image), preimage) to the receiver the hash's names */
+/* push every image as(murmur64(image), preimage) to the consumer the hash's names */
 template <class Wrapper>
 void producer_round(Router_thread &rt, const Wrapper &wrapper, const Params &params, u64 *ctr, u64 round, int phase)
 {
 	constexpr int vlen = Wrapper::vlen;
-	const u64 n_recv = (u64) Router_size(rt, ROUTER_RECEIVER, ROUTER_GLOBAL);
+	const u64 n_recv = (u64) Router_size(rt, ROUTER_CONSUMER, ROUTER_GLOBAL);
 	u64 lo = 0;
 	u64 hi = params.domain;
 	if (phase == FILL) {
@@ -24,7 +24,7 @@ void producer_round(Router_thread &rt, const Wrapper &wrapper, const Params &par
 		hi = std::min(lo + params.per_round, params.domain);
 	}
 	u64 p = (u64) Router_rank(rt, ROUTER_GLOBAL); 
-	u64 n_pieces = (u64) Router_size(rt, ROUTER_SENDER, ROUTER_GLOBAL);
+	u64 n_pieces = (u64) Router_size(rt, ROUTER_PRODUCER, ROUTER_GLOBAL);
 	u64 span = hi - lo;
 	u64 piece = span / n_pieces;
 	u64 extra = span % n_pieces;

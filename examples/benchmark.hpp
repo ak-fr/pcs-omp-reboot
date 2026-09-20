@@ -52,10 +52,10 @@ static void display_stats(u64 N, double start, int vlen, int n_threads, MPI_Comm
  * The routed pass, in two pushers: `vectorized` false runs the scalar one -- one evaluation, one
  * murmur64, one push per iteration, always pb.f (FILL's function for either wrapper) -- and true runs
  * direct/producer.hpp's own body verbatim, vlen inputs through wrapper.veval and vlen pushes at a time.
- * Either way, receivers fold what they pop the way router_bench's pure benchmark does, an add and a XOR, no
+ * Either way, consumers fold what they pop the way router_bench's pure benchmark does, an add and a XOR, no
  * murmur128 and no dictionary.  So the gap between one of these rates and the matching isolated rate above
  * (scalar vs scalar, vector vs vector) is the Router's cost and nothing else.  Builds its own team for one
- * second -- 1 service + dicts_per_node receivers + producers_per_node producers per node, the same knobs the
+ * second -- 1 service + dicts_per_node consumers + producers_per_node producers per node, the same knobs the
  * direct engine sizes its team with -- then tears it down; needs no RAM budget, since nothing here is a
  * dictionary.  Collective
  */
@@ -72,24 +72,24 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 	int R = opts.dicts_per_node;
 	int S = opts.producers_per_node > 0 ? opts.producers_per_node : n_cpu - 1 - R;
 	if (S < 1)
-		errx(1, "benchmark: no CPU left for a producer (%d available, 1 service thread, %d receivers)", n_cpu, R);
+		errx(1, "benchmark: no CPU left for a producer (%d available, 1 service thread, %d consumers)", n_cpu, R);
 	int n_threads = 1 + R + S;
 	u64 n_recv = (u64) R * (u64) n_nodes;
 	u64 mask = make_mask(wrapper.n);
 
 	if (rank == 0)
-		printf("Benchmarking routed %s implementation (%d processes x (1 service + %d receiver + %d producer))\n",
+		printf("Benchmarking routed %s implementation (%d processes x (1 service + %d consumer + %d producer))\n",
 		       vectorized ? "vector" : "scalar", n_nodes, R, S);
 	MPI_Barrier(opts.mpi_comm);
 
 	/* a reduction clause only combines at the parallel region's own closing brace, not at a barrier written
-	   inside it, and tid 0 reads xor_hash before that point below -- so fold receivers' shares by hand */
+	   inside it, and tid 0 reads xor_hash before that point below -- so fold consumers' shares by hand */
 	std::vector<u64> xor_local(n_threads, 0);
 	double t0 = 0;
 	#pragma omp parallel num_threads(n_threads)
 	{
 		int tid = omp_get_thread_num();
-		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_RECEIVER : ROUTER_SENDER);
+		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_CONSUMER : ROUTER_PRODUCER);
 		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, opts.mpi_comm, TAG, &opts.router);
 
 		if (tid == 0)
@@ -99,7 +99,7 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 		if (role == ROUTER_SERVICE) {
 			while (not Router_Test_quiescent(rt))
 				Router_Progress(rt);
-		} else if (role == ROUTER_RECEIVER) {
+		} else if (role == ROUTER_CONSUMER) {
 			u64 x = 0;
 			for (;;) {
 				u64 a, b;
@@ -159,7 +159,7 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 			u64 st[ROUTER_STATS_SIZE];
 			Router_Stats(st, rt);
 			u64 tot[ROUTER_STATS_SIZE];
-			u64 xor_hash = 0;              /* every receiver's slot wrote before the barrier above */
+			u64 xor_hash = 0;              /* every consumer's slot wrote before the barrier above */
 			for (int t = 0; t < n_threads; t++)
 				xor_hash ^= xor_local[t];
 			u64 folded;

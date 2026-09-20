@@ -61,8 +61,8 @@ struct Params : Options {
 			errx(1, "pcs: a %d-bit domain does not fit a %d-bit range: the trails have nowhere to walk", n, m);
 		if (dicts_per_node < 1)
 			errx(1, "--dicts-per-node %d: at least one dictionary shard per node", dicts_per_node);
-		int R = dicts_per_node;            /* dict threads per node: the Router's receivers */
-		int S = producers_per_node;        /* walkers per node: the Router's senders; 0 == fill the mask */
+		int R = dicts_per_node;            /* dict threads per node: the Router's consumers */
+		int S = producers_per_node;        /* walkers per node: the Router's producers; 0 == fill the mask */
 		int n_cpu = omp_get_num_procs();   /* the CPUs the rank may use: what the team fills when S == 0 */
 		if (S == 0)
 			S = n_cpu - 1 - R;

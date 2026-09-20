@@ -6,22 +6,22 @@
 namespace mitm {
 
 /*
- * A sender gets its lines and its cache of blocks, a receiver its inbox, the service thread neither (an unused
+ * A producer gets its lines and its cache of blocks, a consumer its inbox, the service thread neither (an unused
  * inbox has one slot).  The object registers itself with the node, then holds the team's last barrier: this is
  * Router_Init's last stage, and the constructor runs nowhere else.  Past the barrier the service may read every
  * object, and thread 0 prints the measured layout.
  */
 inline Router_thread::Router_thread(int role_, int index_, int group_, int cpu_, Router_node &rn)
-	: swc(role_ == ROUTER_SENDER ? (Point *) router_alloc((size_t) rn.F * rn.swc_linesize * sizeof(Point)) : NULL),
+	: swc(role_ == ROUTER_PRODUCER ? (Point *) router_alloc((size_t) rn.F * rn.swc_linesize * sizeof(Point)) : NULL),
 	  swc_linesize(rn.swc_linesize), role(role_), index(index_),
 	  group(group_), cpu(cpu_), node(rn), closed(0),
-	  inbox(role_ == ROUTER_RECEIVER ? (size_t) rn.opt.inbox_blocks : 0)
+	  inbox(role_ == ROUTER_CONSUMER ? (size_t) rn.opt.inbox_blocks : 0)
 {
-	if (role == ROUTER_SENDER) {
-		rn.senders[index] = this;
+	if (role == ROUTER_PRODUCER) {
+		rn.producers[index] = this;
 		rn.refill(*this);
-	} else if (role == ROUTER_RECEIVER)
-		rn.receivers[index] = this;
+	} else if (role == ROUTER_CONSUMER)
+		rn.consumers[index] = this;
 	#pragma omp barrier
 	if (role == ROUTER_SERVICE && rn.rank == 0 && rn.opt.verbose)
 		rn.plan.report_measured();
@@ -86,22 +86,22 @@ inline void Router_node::connect()
 		errx(1, "Router: MPI_THREAD_FUNNELED is required (got %d)", provided);
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &n_nodes);
-	S = 0;
-	R = 0;
+	P = 0;
+	C = 0;
 	for (size_t t = 1; t < roles.size(); t++) {
-		if (roles[t] == ROUTER_SENDER)
-			S += 1;
+		if (roles[t] == ROUTER_PRODUCER)
+			P += 1;
 		else
-			R += 1;
+			C += 1;
 	}
-	if (S < 1 || R < 1)
-		errx(1, "Router: a node needs at least one sender and one receiver (S=%d, R=%d)", S, R);
+	if (P < 1 || C < 1)
+		errx(1, "Router: a node needs at least one producer and one consumer (P=%d, C=%d)", P, C);
 
 	/* every node must agree on the team's shape and on the options: a difference is fatal, and named */
 	const int N_AGREE = 10;
-	const char *name[N_AGREE] = {"senders", "receivers", "block_points", "swc_linesize", "n_recv", "inbox_blocks",
+	const char *name[N_AGREE] = {"producers", "consumers", "block_points", "swc_linesize", "n_recv", "inbox_blocks",
 	                             "credit", "pin", "cache_level", "group_size"};
-	double mine[N_AGREE] = {(double) S, (double) R, (double) opt.block_points,
+	double mine[N_AGREE] = {(double) P, (double) C, (double) opt.block_points,
 							(double) opt.swc_linesize, (double) opt.n_recv, (double) opt.inbox_blocks,
 							(double) opt.credit, (double) opt.pin, (double) opt.cache_level, (double) opt.group_size};
 	double lo[N_AGREE], hi[N_AGREE];
@@ -170,16 +170,16 @@ inline void Router_node::connect()
 	if (opt.pin && plan.thread_cpu[0] >= 0 && pin_to_cpu(plan.thread_cpu[0]) < 0)
 		warn("Router: rank %d: cannot pin the service thread to CPU %d", rank, plan.thread_cpu[0]);
 
-	int P = n_nodes;
-	credit_used.assign(P, 0);
-	seq_sent.assign(P, 0);
-	end_msg.assign(P, RouterMsgHdr());
-	end_req.assign(P, MPI_REQUEST_NULL);
-	end_sent.assign(P, 0);
-	n_data_recv.assign(P, 0);
-	end_seq.assign(P, -1);
+	int n_peers = n_nodes;
+	credit_used.assign(n_peers, 0);
+	seq_sent.assign(n_peers, 0);
+	end_msg.assign(n_peers, RouterMsgHdr());
+	end_req.assign(n_peers, MPI_REQUEST_NULL);
+	end_sent.assign(n_peers, 0);
+	n_data_recv.assign(n_peers, 0);
+	end_seq.assign(n_peers, -1);
 
-	F = R * n_nodes;
+	F = C * n_nodes;
 
 	size_t swc = opt.swc_linesize;
 	if (swc == 0) {                       /* the lines fit L2, and a block switch is at most one line in 8 */
@@ -195,11 +195,11 @@ inline void Router_node::connect()
 	nv_stride = (L + 63) & ~(u32) 63;
 	block_bytes = ROUTER_HDR_BYTES + opt.block_points * sizeof(Point);
 
-	/* installed, the stash, the slots, what the receivers may hold, the senders' caches, pending, and sealed or
+	/* installed, the stash, the slots, what the consumers may hold, the producers' caches, pending, and sealed or
 	 * parked */
-	size_t slack = 16 * ((size_t) F > 32 * (size_t) S ? (size_t) F : 32 * (size_t) S);   /* EXPERIMENT: x16 */
+	size_t slack = 16 * ((size_t) F > 32 * (size_t) P ? (size_t) F : 32 * (size_t) P);   /* EXPERIMENT: x16 */
 	size_t nb = (size_t) F + 2 * ROUTER_BATCH + 2 * (size_t) opt.n_recv
-				+ (size_t) R * ((size_t) opt.inbox_blocks + 1) + (size_t) S * (ROUTER_BATCH + 1) + slack;
+				+ (size_t) C * ((size_t) opt.inbox_blocks + 1) + (size_t) P * (ROUTER_BATCH + 1) + slack;
 	if (nb > ((size_t) 1 << 30))          /* the ring's sequence arithmetic is 32-bit */
 		errx(1, "Router: too many blocks (%zu)", nb);
 	n_blocks = (u32) nb;
@@ -208,7 +208,7 @@ inline void Router_node::connect()
 	if (pool == NULL)
 		err(1, "Router: aligned_alloc(%zu)", (size_t) n_blocks * block_bytes);
 	n_valid = (Atomic<u8> *) router_alloc((size_t) n_blocks * nv_stride);
-	partial_cap = ((size_t) S * (swc_linesize - 1) + 3) & ~(size_t) 3;
+	partial_cap = ((size_t) P * (swc_linesize - 1) + 3) & ~(size_t) 3;
 	partial = (Point *) router_alloc((size_t) F * partial_cap * sizeof(Point));
 	blk_link = (Atomic<u64> *) router_alloc((size_t) n_blocks * sizeof(u64));
 	free_mask = 1;
@@ -223,10 +223,10 @@ inline void Router_node::connect()
 		free_list.push_back(b);
 	}
 	blk_count.assign(n_blocks, 0);
-	park_head.assign(R + n_nodes, ROUTER_NONE);
-	park_tail.assign(R + n_nodes, ROUTER_NONE);
-	pending.reserve(S + 1);
-	inbox_pushed.assign(R, 0);
+	park_head.assign(C + n_nodes, ROUTER_NONE);
+	park_tail.assign(C + n_nodes, ROUTER_NONE);
+	pending.reserve(P + 1);
+	inbox_pushed.assign(C, 0);
 
 	out_req.assign(opt.n_recv, MPI_REQUEST_NULL);
 	out_blk.assign(opt.n_recv, ROUTER_NONE);
@@ -238,8 +238,8 @@ inline void Router_node::connect()
 	in_blk.assign(opt.n_recv, ROUTER_NONE);
 	mpi_idx.assign(opt.n_recv, 0);
 	mpi_st.assign(opt.n_recv, MPI_Status());
-	senders.assign(S, NULL);
-	receivers.assign(R, NULL);
+	producers.assign(P, NULL);
+	consumers.assign(C, NULL);
 
 	for (int d = 0; d < F; d++)
 		dest[ROUTER_DEST_WORDS * d] = (u64) stash_pop();
@@ -263,16 +263,16 @@ inline void Router_node::touch_pool(int tid, int n_threads)
 inline void Router_node::banner() const
 {
 	double blocks = (double) n_blocks * block_bytes;
-	double lines = (double) S * F * swc_linesize * sizeof(Point);
-	double inboxes = (double) R * opt.inbox_blocks * sizeof(RouterBlockMsg);
+	double lines = (double) P * F * swc_linesize * sizeof(Point);
+	double inboxes = (double) C * opt.inbox_blocks * sizeof(RouterBlockMsg);
 	double closing = (double) F * partial_cap * sizeof(Point);
-	printf("Router: %d node%s, %d sender%s and %d receiver%s per node, %d destinations\n",
-	       n_nodes, n_nodes > 1 ? "s" : "", S, S > 1 ? "s" : "", R, R > 1 ? "s" : "", F);
+	printf("Router: %d node%s, %d producer%s and %d consumer%s per node, %d destinations\n",
+	       n_nodes, n_nodes > 1 ? "s" : "", P, P > 1 ? "s" : "", C, C > 1 ? "s" : "", F);
 	printf("Router: blocks of %zu points, lines of %zu (%u lines per block), %u blocks (%.1f MB, %u cached per"
-	       " sender), messages of %zu bytes\n", opt.block_points, swc_linesize, L, n_blocks, blocks / 1e6,
+	       " producer), messages of %zu bytes\n", opt.block_points, swc_linesize, L, n_blocks, blocks / 1e6,
 	       ROUTER_BATCH, block_bytes);
-	printf("Router: private lines %.1f MB (%.1f MB per sender), closing buffers %.1f MB (%zu points per destination)\n",
-	       lines / 1e6, lines / 1e6 / S, closing / 1e6, partial_cap);
+	printf("Router: private lines %.1f MB (%.1f MB per producer), closing buffers %.1f MB (%zu points per destination)\n",
+	       lines / 1e6, lines / 1e6 / P, closing / 1e6, partial_cap);
 	printf("Router: inboxes of %d blocks (%.1f MB), %d receive and %d send slots, credit %d per peer, stash batches"
 	       " of %u\n", opt.inbox_blocks, inboxes / 1e6, opt.n_recv, opt.n_recv, opt.credit, ROUTER_BATCH);
 }
@@ -294,10 +294,10 @@ inline void Router_node::banner() const
 	rn = new Router_node(omp_get_num_threads(), comm, tag, opts);
 	if (tid == 0)
 		rn->roles[0] = ROUTER_SERVICE;
-	else if (role == ROUTER_SENDER || role == ROUTER_RECEIVER)
+	else if (role == ROUTER_PRODUCER || role == ROUTER_CONSUMER)
 		rn->roles[tid] = role;
 	else
-		errx(1, "Router_Init: role must be ROUTER_SENDER or ROUTER_RECEIVER");
+		errx(1, "Router_Init: role must be ROUTER_PRODUCER or ROUTER_CONSUMER");
 	rn->colors[tid] = (tid == 0) ? ROUTER_GROUP_AUTO : group;
 	if (sched_getaffinity(0, sizeof(cpu_set_t), &rn->masks[tid]) != 0)
 		err(1, "Router_Init: sched_getaffinity");
@@ -334,7 +334,7 @@ inline void Router_node::banner() const
 	                     *rn);   /* registers itself, then holds the team's last barrier */
 }
 
-/* Sender or receiver.  Its group, 0..Router_num_groups(rt)-1; -1 for the service thread. */
+/* Producer or consumer.  Its group, 0..Router_num_groups(rt)-1; -1 for the service thread. */
 inline int Router_group(const Router_thread &rt)
 {
 	return rt.group;
@@ -350,10 +350,10 @@ inline int Router_num_groups(const Router_thread &rt)
 inline int Router_size(const Router_thread &rt, int role, int scope)
 {
 	int per_node = 1;                    /* the service: one per node, so its global size is the node count */
-	if (role == ROUTER_SENDER)
-		per_node = rt.node.S;
-	else if (role == ROUTER_RECEIVER)
-		per_node = rt.node.R;
+	if (role == ROUTER_PRODUCER)
+		per_node = rt.node.P;
+	else if (role == ROUTER_CONSUMER)
+		per_node = rt.node.C;
 	return (scope == ROUTER_GLOBAL) ? per_node * rt.node.n_nodes : per_node;
 }
 

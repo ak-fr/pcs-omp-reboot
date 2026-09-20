@@ -25,8 +25,8 @@ a count no single node holds, so PCS keeps a controller on rank 0 and a control 
 to reach it; it is Monte-Carlo, so "not found" is never a proof.
 
 The **Router** (`include/router/`) is the transport
-underneath both engines: it carries pairs of `u64` from sender threads to globally
-numbered receiver threads across ranks, and it owns thread placement.
+underneath both engines: it carries pairs of `u64` from producer threads to globally
+numbered consumer threads across ranks, and it owns thread placement.
 
 ## Build
 

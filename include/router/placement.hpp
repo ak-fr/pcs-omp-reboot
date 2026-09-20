@@ -10,8 +10,8 @@
 #include "topology.hpp"
 
 /*
- * Where the Router puts a node's threads, and the groups it forms.  A group is a sub-team of senders and
- * receivers in one cache domain: the staging and the free list will shard on it, and a consumer (PCS) pairs
+ * Where the Router puts a node's threads, and the groups it forms.  A group is a sub-team of producers and
+ * consumers in one cache domain: the staging and the free list will shard on it, and a consumer (PCS) pairs
  * each producer with the dict thread of its group.  By default the Router pins and forms the groups (AUTO);
  * with pin == false it forms them without pinning; with a per-thread color it takes the caller's groups.
  * The role enum and ROUTER_GROUP_AUTO live here, the lowest Router file, so both this and common.hpp see them.
@@ -19,7 +19,7 @@
 
 namespace mitm {
 
-enum router_role { ROUTER_SERVICE = 0, ROUTER_SENDER = 1, ROUTER_RECEIVER = 2 };
+enum router_role { ROUTER_SERVICE = 0, ROUTER_PRODUCER = 1, ROUTER_CONSUMER = 2 };
 
 static constexpr int ROUTER_GROUP_AUTO = -1;   /* Router_Init's `group`: let the Router form the groups */
 
@@ -30,7 +30,7 @@ static constexpr int ROUTER_GROUP_AUTO = -1;   /* Router_Init's `group`: let the
  */
 struct RouterPlacement {
 	bool pin = false;                      /* pin the threads and form the groups, or leave the CPUs to the caller */
-	int n_threads = 0;                     /* the team: 1 service + S senders + R receivers */
+	int n_threads = 0;                     /* the team: 1 service + S producers + R consumers */
 	int n_avail_cpu = 0;                   /* CPUs in the union mask */
 	int n_numa_nodes = 0;                  /* NUMA nodes holding one of them */
 	int cache_level = 0;                   /* the level a group sits in; 0 == none shared by several cores */
@@ -44,15 +44,15 @@ struct RouterPlacement {
 	std::vector<int> thread_group;         /* its group; -1 for the service thread */
 
 	std::vector<int> group_domain;         /* the cache domain of each group; -1 in colors mode */
-	std::vector<int> group_nsend;          /* senders in each group */
-	std::vector<std::vector<int>> group_receivers;   /* per group, the local indices of its receivers */
+	std::vector<int> group_nsend;          /* producers in each group */
+	std::vector<std::vector<int>> group_consumers;   /* per group, the local indices of its consumers */
 
 	RouterPlacement() = default;
 
 	/*
 	 * From the union `mask`, the team's `roles` and `colors` (a worker's group, or ROUTER_GROUP_AUTO), the
 	 * options and the rank (for the reports).  Pinned: topology, groups per domain, then round-robin the
-	 * receivers and the senders over the domains into the least-filled group.  Unpinned: groups by index.
+	 * consumers and the producers over the domains into the least-filled group.  Unpinned: groups by index.
 	 * A color on any worker switches the node to the caller's groups, pinning still the Router's.
 	 */
 	RouterPlacement(const cpu_set_t &mask, const std::vector<int> &roles, const std::vector<int> &colors,
@@ -64,13 +64,13 @@ struct RouterPlacement {
 		thread_numa.assign(n_threads, -1);
 		thread_group.assign(n_threads, -1);
 
-		int S = 0;                         /* senders, receivers, and whether every worker asked for AUTO */
+		int S = 0;                         /* producers, consumers, and whether every worker asked for AUTO */
 		int R = 0;
 		bool auto_groups = true;
 		for (int t = 0; t < n_threads; t++) {
-			if (roles[t] == ROUTER_SENDER)
+			if (roles[t] == ROUTER_PRODUCER)
 				S += 1;
-			else if (roles[t] == ROUTER_RECEIVER)
+			else if (roles[t] == ROUTER_CONSUMER)
 				R += 1;
 			if (roles[t] != ROUTER_SERVICE && colors[t] != ROUTER_GROUP_AUTO)
 				auto_groups = false;
@@ -87,7 +87,7 @@ struct RouterPlacement {
 	}
 
 	/* the group in `groups` with the fewest of `count` so far, ties to the lowest id.  Reached from the
-	 * receiver and the sender passes of the pinned AUTO placement. */
+	 * consumer and the producer passes of the pinned AUTO placement. */
 	int least_filled(const std::vector<int> &groups, const std::vector<int> &count) const
 	{
 		int best = groups[0];
@@ -115,7 +115,7 @@ struct RouterPlacement {
 		}
 		group_domain.assign(n_groups, -1);
 		group_nsend.assign(n_groups, 0);
-		group_receivers.assign(n_groups, std::vector<int>());
+		group_consumers.assign(n_groups, std::vector<int>());
 		std::vector<char> used(n_groups, 0);
 		int r_local = 0;
 		for (int t = 0; t < n_threads; t++) {
@@ -123,10 +123,10 @@ struct RouterPlacement {
 				continue;
 			thread_group[t] = colors[t];
 			used[colors[t]] = 1;
-			if (thread_role[t] == ROUTER_SENDER)
+			if (thread_role[t] == ROUTER_PRODUCER)
 				group_nsend[colors[t]] += 1;
 			else
-				group_receivers[colors[t]].push_back(r_local++);
+				group_consumers[colors[t]].push_back(r_local++);
 		}
 		for (int g = 0; g < n_groups; g++)
 			if (not used[g])
@@ -149,15 +149,15 @@ struct RouterPlacement {
 		n_groups = std::max(std::max(gs, gr), 1);
 		group_domain.assign(n_groups, -1);
 		group_nsend.assign(n_groups, 0);
-		group_receivers.assign(n_groups, std::vector<int>());
+		group_consumers.assign(n_groups, std::vector<int>());
 		int r_local = 0;
 		int s_local = 0;
 		for (int t = 0; t < n_threads; t++) {
-			if (thread_role[t] == ROUTER_RECEIVER) {
+			if (thread_role[t] == ROUTER_CONSUMER) {
 				int g = r_local % n_groups;
 				thread_group[t] = g;
-				group_receivers[g].push_back(r_local++);
-			} else if (thread_role[t] == ROUTER_SENDER) {
+				group_consumers[g].push_back(r_local++);
+			} else if (thread_role[t] == ROUTER_PRODUCER) {
 				int g = s_local++ % n_groups;
 				thread_group[t] = g;
 				group_nsend[g] += 1;
@@ -168,7 +168,7 @@ struct RouterPlacement {
 	/*
 	 * The pinned placement: the service alone on a whole core of the first domain -- its SMT siblings stay empty,
 	 * since one service thread is the node's ceiling wherever the transport copies through the kernel, and a
-	 * sibling would take its issue slots --, then the receivers and the senders round-robined
+	 * sibling would take its issue slots --, then the consumers and the producers round-robined
 	 * over the domains on ONE cursor that starts after the service's domain, so that the two passes' remainders
 	 * do not stack up on the low domains (they did, and the team then doubled up cores at one end of the machine
 	 * while leaving cores idle at the other), each onto its domain's emptiest core (a full domain borrows
@@ -228,7 +228,7 @@ struct RouterPlacement {
 				}
 			}
 			group_nsend.assign(n_groups, 0);
-			group_receivers.assign(n_groups, std::vector<int>());
+			group_consumers.assign(n_groups, std::vector<int>());
 		}
 
 		std::vector<std::vector<int>> numa_domains(n_numa_nodes);   /* the domains of each NUMA node, ascending */
@@ -253,7 +253,7 @@ struct RouterPlacement {
 			domain_order.push_back(numa_domains[best][taken[best]++]);
 		}
 
-		std::vector<int> grp_recv(n_groups, 0);     /* receivers placed in each group so far, for least_filled */
+		std::vector<int> grp_recv(n_groups, 0);     /* consumers placed in each group so far, for least_filled */
 		std::vector<size_t> next_cpu(core_cpus.size(), 0);   /* each core's next free CPU */
 
 		int d0 = domain_order[0];                   /* the service: the first domain of the order, a whole core to itself */
@@ -274,10 +274,10 @@ struct RouterPlacement {
 		int dc = n_domains > 1 ? 1 : 0;             /* the cursor, a position in domain_order: the service took the
 		                                             * core it starts on */
 		int r_local = 0;
-		for (int pass = 0; pass < 2; pass++) {      /* the receivers, then the senders, on one cursor over the whole
+		for (int pass = 0; pass < 2; pass++) {      /* the consumers, then the producers, on one cursor over the whole
 		                                             * team, so the two passes' remainders do not stack up on the
 		                                             * low domains, on top of the service's core */
-			int want = (pass == 0) ? ROUTER_RECEIVER : ROUTER_SENDER;
+			int want = (pass == 0) ? ROUTER_CONSUMER : ROUTER_PRODUCER;
 			std::vector<int> &count = (pass == 0) ? grp_recv : group_nsend;
 			for (int t = 0; t < n_threads; t++) {
 				if (thread_role[t] != want)
@@ -297,8 +297,8 @@ struct RouterPlacement {
 				int g = least_filled(domain_groups[d], count);
 				thread_group[t] = g;
 				count[g] += 1;
-				if (want == ROUTER_RECEIVER)
-					group_receivers[g].push_back(r_local++);
+				if (want == ROUTER_CONSUMER)
+					group_consumers[g].push_back(r_local++);
 			}
 		}
 	}
@@ -317,21 +317,21 @@ struct RouterPlacement {
 			printf(", no cache shared by several cores (one domain)");
 		int smin = group_nsend.empty() ? 0 : group_nsend[0];
 		int smax = 0;
-		int rmin = group_receivers.empty() ? 0 : (int) group_receivers[0].size();
+		int rmin = group_consumers.empty() ? 0 : (int) group_consumers[0].size();
 		int rmax = 0;
 		for (int g = 0; g < n_groups; g++) {
 			smin = std::min(smin, group_nsend[g]);
 			smax = std::max(smax, group_nsend[g]);
-			rmin = std::min(rmin, (int) group_receivers[g].size());
-			rmax = std::max(rmax, (int) group_receivers[g].size());
+			rmin = std::min(rmin, (int) group_consumers[g].size());
+			rmax = std::max(rmax, (int) group_consumers[g].size());
 		}
-		printf("; %d group(s) of %d..%d senders and %d..%d receivers, threads pinned, the service alone on its core\n",
+		printf("; %d group(s) of %d..%d producers and %d..%d consumers, threads pinned, the service alone on its core\n",
 		       n_groups, smin, smax, rmin, rmax);
 	}
 
 	/*
 	 * What the kernel honoured, once the team is pinned and every thread's getcpu has confirmed it: per NUMA
-	 * node the counts by role, then per domain its groups with their sender/receiver counts while the domains
+	 * node the counts by role, then per domain its groups with their producer/consumer counts while the domains
 	 * are few enough to list.  Reached from thread 0's Router_thread constructor, rank 0 when verbose.
 	 */
 	void report_measured() const
@@ -352,12 +352,12 @@ struct RouterPlacement {
 					continue;
 				if (thread_role[t] == ROUTER_SERVICE)
 					n_comm += 1;
-				else if (thread_role[t] == ROUTER_SENDER)
+				else if (thread_role[t] == ROUTER_PRODUCER)
 					n_send += 1;
 				else
 					n_recv += 1;
 			}
-			printf("NUMA node %d: %s%d senders + %d receivers\n", ids[j], n_comm ? "service + " : "",
+			printf("NUMA node %d: %s%d producers + %d consumers\n", ids[j], n_comm ? "service + " : "",
 			       n_send, n_recv);
 		}
 		if (cache_level > 0 && n_domains <= 32)
@@ -370,7 +370,7 @@ struct RouterPlacement {
 				printf("L%d domain %d: groups", cache_level, d);
 				for (int g = 0; g < n_groups; g++)
 					if (group_domain[g] == d)
-						printf(" %d(%ds %zur)", g, group_nsend[g], group_receivers[g].size());
+						printf(" %d(%ds %zur)", g, group_nsend[g], group_consumers[g].size());
 				printf("\n");
 			}
 		fflush(stdout);

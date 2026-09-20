@@ -135,8 +135,8 @@ struct alignas(sizeof(u64) * ProblemWrapper::vlen) Lanes {
 	Lanes(Router_thread &rt, const ProblemWrapper &wrapper, u64 ctr[], u8 hll[], const Params &params,
 	      Shared &shared, CollisionQueue &coll_q)
 		: rt(rt), wrapper(wrapper), ctr(ctr), hll(hll), params(params), shared(shared), coll_q(coll_q),
-		  jmask(make_mask(params.jbits)), n_recv((u64) Router_size(rt, ROUTER_RECEIVER, ROUTER_GLOBAL)),
-		  jinc((u64) Router_size(rt, ROUTER_SENDER, ROUTER_GLOBAL)), root_seed(shared.header.root_seed)
+		  jmask(make_mask(params.jbits)), n_recv((u64) Router_size(rt, ROUTER_CONSUMER, ROUTER_GLOBAL)),
+		  jinc((u64) Router_size(rt, ROUTER_PRODUCER, ROUTER_GLOBAL)), root_seed(shared.header.root_seed)
 	{
 		for (int l = 0; l < vlen; l++) {
 			seed1[l] = 0;

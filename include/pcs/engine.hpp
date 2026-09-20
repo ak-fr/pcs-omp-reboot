@@ -68,15 +68,15 @@ static void display(const Router_thread &rt, const Params &params, const u64 rep
 {
 	u64 ndp = reported[N_DP];
 	double completion = (double) ndp / params.points_per_version;
-	const int walkers = Router_size(rt, ROUTER_SENDER, ROUTER_GLOBAL);
-	const int dicts = Router_size(rt, ROUTER_RECEIVER, ROUTER_GLOBAL);
+	const int walkers = Router_size(rt, ROUTER_PRODUCER, ROUTER_GLOBAL);
+	const int dicts = Router_size(rt, ROUTER_CONSUMER, ROUTER_GLOBAL);
 	const int nodes = Router_size(rt, ROUTER_SERVICE, ROUTER_GLOBAL);
 	double send_wait;                      /* share of the round the walkers waited for a block */
 	double recv_wait;                      /* share the dict threads had nothing to pop */
 	double busy;                           /* share the service spent in turns that moved something */
 	const char *limit = Router_Bottleneck(reported + REC_ROUTER, rt, &send_wait, &recv_wait, &busy);
 	print("\rRound {}:  {:.1f}s ({:.1f}%, ETA {:.1f}s).  {:.2f}*w #DP.  {} #f/s per walker.  "
-	      "{} probe/s per dict thread.  node-->{}B/s.  wait: senders {:5.1f}% receivers {:5.1f}%, "
+	      "{} probe/s per dict thread.  node-->{}B/s.  wait: producers {:5.1f}% consumers {:5.1f}%, "
 	      "service {:5.1f}% busy --> {:<15}   ", nround + 1, delta, 100. * completion,
 	      (completion > 0) ? delta * (1 - completion) / completion : 0.,
 	      (double) ndp / params.w,
@@ -95,8 +95,8 @@ static void round_report(const Router_thread &rt, const Params &params, const u6
                          const RoundStats &round, const RoundStats &all, double delta, u64 nround)
 {
 	u64 ndp = r[N_DP];
-	const int walkers = Router_size(rt, ROUTER_SENDER, ROUTER_GLOBAL);
-	const int dicts = Router_size(rt, ROUTER_RECEIVER, ROUTER_GLOBAL);
+	const int walkers = Router_size(rt, ROUTER_PRODUCER, ROUTER_GLOBAL);
+	const int dicts = Router_size(rt, ROUTER_CONSUMER, ROUTER_GLOBAL);
 	const int nodes = Router_size(rt, ROUTER_SERVICE, ROUTER_GLOBAL);
 
 	print("\n");
@@ -112,7 +112,7 @@ static void round_report(const Router_thread &rt, const Params &params, const u6
 	double recv_wait;                      /* share the dict threads had nothing to pop */
 	double busy;                           /* share the service spent in turns that moved something */
 	const char *limit = Router_Bottleneck(r + REC_ROUTER, rt, &send_wait, &recv_wait, &busy);
-	print("            LIMITED BY {}:  senders waited {:.1f}% of the round, receivers {:.1f}%, the service was "
+	print("            LIMITED BY {}:  producers waited {:.1f}% of the round, consumers {:.1f}%, the service was "
 	      "busy {:.1f}%\n", limit, 100. * send_wait, 100. * recv_wait, 100. * busy);
 
 	if (ndp > 0) {
@@ -319,17 +319,17 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 	#pragma omp parallel num_threads(n_threads)
 	{
 		int tid = omp_get_thread_num();
-		int role = ROUTER_SENDER;
+		int role = ROUTER_PRODUCER;
 		if (tid == 0)
 			role = ROUTER_SERVICE;
 		else if (tid <= R)
-			role = ROUTER_RECEIVER;
+			role = ROUTER_CONSUMER;
 		Router_thread rt = Router_Init(role, ROUTER_GROUP_AUTO, params.mpi_comm, ROUTER_TAG, &params.router);
 		u64 *ctr = shared.tally[tid].ctr;
 		const int me = Router_rank(rt, ROUTER_NODE);           /* among this node's threads of my role */
 
 		/* every per-thread object is built here, once the Router has pinned its thread: first touch */
-		PcsDict dict(params.jbits, (role == ROUTER_RECEIVER) ? params.w_shard : 0);
+		PcsDict dict(params.jbits, (role == ROUTER_CONSUMER) ? params.w_shard : 0);
 		std::vector<u8> hll;                        /* a walker's distinct-collision registers */
 		std::vector<int> recv_of;                   /* which dict thread each walker resolves for */
 		std::vector<int> n_walkers;                 /* ... and how many walkers each of them has */
@@ -337,12 +337,12 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 		std::vector<u64> stats;                     /* thread 0: the node's Router tallies for the round */
 		std::unique_ptr<Control> control;           /* thread 0: its end of the control channel */
 
-		if (role == ROUTER_RECEIVER) {
+		if (role == ROUTER_CONSUMER) {
 			shared.group[me] = Router_group(rt);
 			shared.chan[me].q = std::make_unique<CollisionQueue>(params.coll_queue_capacity);
 		}
-		if (role == ROUTER_SENDER) {
-			shared.group[Router_size(rt, ROUTER_RECEIVER, ROUTER_NODE) + me] = Router_group(rt);
+		if (role == ROUTER_PRODUCER) {
+			shared.group[Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE) + me] = Router_group(rt);
 			hll.assign(HLL_REGISTERS, 0);
 			shared.hll[tid] = hll.data();
 		}
@@ -361,12 +361,12 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 		 * which would silently drop every collision it found.
 		 */
 		int chan = me;                 /* the channel this thread works: a dict thread's own, a walker's assigned */
-		if (role != ROUTER_RECEIVER) {
-			recv_of.assign(Router_size(rt, ROUTER_SENDER, ROUTER_NODE), -1);
-			n_walkers.assign(Router_size(rt, ROUTER_RECEIVER, ROUTER_NODE), 0);
-			assign_receivers(rt, shared.group.data(), recv_of.data(), n_walkers.data());
+		if (role != ROUTER_CONSUMER) {
+			recv_of.assign(Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE), -1);
+			n_walkers.assign(Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE), 0);
+			assign_consumers(rt, shared.group.data(), recv_of.data(), n_walkers.data());
 		}
-		if (role == ROUTER_SENDER)
+		if (role == ROUTER_PRODUCER)
 			chan = recv_of[me];
 		if (role == ROUTER_SERVICE) {
 			int lo = n_walkers[0];
@@ -393,7 +393,7 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 
 			if (role == ROUTER_SERVICE)
 				service_round(rt, params, shared, *control, stats.data());
-			else if (role == ROUTER_RECEIVER)
+			else if (role == ROUTER_CONSUMER)
 				dict_round(rt, params, shared, dict, ctr, chan);
 			else
 				walker_round(rt, wrapper, params, shared, ctr, hll.data(), chan);

@@ -92,7 +92,7 @@ static void dict_round(Router_thread &rt, const Params &params, Shared &shared, 
 	CollisionQueue &coll_q = *shared.chan[r].q;
 	const u64 i = shared.header.i;
 	const u64 jmask = make_mask(params.jbits);
-	const u64 n_recv = (u64) Router_size(rt, ROUTER_RECEIVER, ROUTER_GLOBAL);   /* the routing modulus */
+	const u64 n_recv = (u64) Router_size(rt, ROUTER_CONSUMER, ROUTER_GLOBAL);   /* the routing modulus */
 	static const size_t BATCH = 64;
 	CollisionCandidate pending[BATCH];     /* hits waiting for the run to be handed over */
 	size_t n_pending = 0;

@@ -235,10 +235,10 @@ struct Shared {
  * from the published groups alone -- `group` is the Shared's: the R dict threads' then the S walkers',
  * by local rank -- so every thread runs it and gets the same answer.
  */
-static void assign_receivers(const Router_thread &rt, const int group[], int recv_of[], int n_walkers[])
+static void assign_consumers(const Router_thread &rt, const int group[], int recv_of[], int n_walkers[])
 {
-	const int R = Router_size(rt, ROUTER_RECEIVER, ROUTER_NODE);
-	const int S = Router_size(rt, ROUTER_SENDER, ROUTER_NODE);
+	const int R = Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE);
+	const int S = Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE);
 	const int n_groups = Router_num_groups(rt);
 	for (int r = 0; r < R; r++)
 		n_walkers[r] = 0;

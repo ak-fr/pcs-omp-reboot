@@ -39,16 +39,16 @@ target_compile_definitions(router_test PRIVATE ROUTER_PARANOID)
 mitm_example(router_bench)
 
 # The Router: one rank, two ranks, four ranks -- 8 spinning threads in all on an 8-core laptop (12 at
-# np 4, the minimum of one service thread, one sender and one receiver per rank).  np 1 pins (one rank
+# np 4, the minimum of one service thread, one producer and one consumer per rank).  np 1 pins (one rank
 # owns the machine); np 2 and np 4 put several ranks on the one host, whose masks overlap, so they pass
 # --no-bind (the Router refuses to pin overlapping masks) -- pinned multi-rank needs --map-by numa on a
 # real cluster.
 add_test(NAME router_np1 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
-         $<TARGET_FILE:router_test> --senders 4 --receivers 3 --quiet)
+         $<TARGET_FILE:router_test> --producers 4 --consumers 3 --quiet)
 add_test(NAME router_np2 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-         $<TARGET_FILE:router_test> --senders 2 --receivers 1 --no-bind --quiet)
+         $<TARGET_FILE:router_test> --producers 2 --consumers 1 --no-bind --quiet)
 add_test(NAME router_np4 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
-         $<TARGET_FILE:router_test> --senders 1 --receivers 1 --no-bind --quiet)
+         $<TARGET_FILE:router_test> --producers 1 --consumers 1 --no-bind --quiet)
 
 
 ###### The direct engine: a planted claw over 2^20 preimages, found or the exit status says so

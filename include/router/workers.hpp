@@ -30,10 +30,10 @@ inline void Router_node::free_push(const u32 *blks, u32 n)
  * when claimed, and a claim moves free_out, which fails the CAS: the ids read before it are the blocks.  The
  * acquire loads pair with the pushers' release stores: what they did to a block is visible to whoever pops it.
  * `floor` blocks are left in the ring for the caller who passes zero, the service: a node that cannot post a
- * receive stalls every peer that sends to it, and a peer's send holds a block until it completes, so senders
- * taking the last block deadlock the whole run.  The receivers' releases refill the ring without the network.
+ * receive stalls every peer that sends to it, and a peer's send holds a block until it completes, so producers
+ * taking the last block deadlock the whole run.  The consumers' releases refill the ring without the network.
  * Nothing is held back with one node: nothing arrives, so a posted receive never needs replacing.
- * Reached from Router_Push (a sender's refill, floor n_recv) and from the service whenever its stash runs empty.
+ * Reached from Router_Push (a producer's refill, floor n_recv) and from the service whenever its stash runs empty.
  */
 inline u32 Router_node::free_pop_many(u32 k, u32 *out, u32 floor)
 {
@@ -71,13 +71,13 @@ inline u32 Router_node::free_pop_many(u32 k, u32 *out, u32 floor)
 }
 
 
-/******************************** the sender path ********************************/
+/******************************** the producer path ********************************/
 
 /*
- * A sender's cache filled off the free ring, a batch in one CAS, every block zeroed here rather than at its
+ * A producer's cache filled off the free ring, a batch in one CAS, every block zeroed here rather than at its
  * install: it waits for at least one block, holding nothing meanwhile, so that no point is ever lost.  The wait
- * is timed into WAIT_SEND: a sender starved of blocks is the one way the Router holds a producer back.
- * Reached from Router_Init (the sender's constructor) and Router_Push, by the sealer whose install emptied it.
+ * is timed into WAIT_SEND: a producer starved of blocks is the one way the Router holds a producer back.
+ * Reached from Router_Init (the producer's constructor) and Router_Push, by the sealer whose install emptied it.
  */
 inline void Router_node::refill(Router_thread &s)
 {
@@ -98,7 +98,7 @@ inline void Router_node::refill(Router_thread &s)
 
 /*
  * No line of a block about to be installed is written yet.
- * Reached from Router_Init and Router_Push (a sender's refill), and Router_Progress (the F-scan's fresh block).
+ * Reached from Router_Init and Router_Push (a producer's refill), and Router_Progress (the F-scan's fresh block).
  */
 inline void Router_node::zero_valid(u32 blk)
 {
@@ -121,9 +121,9 @@ inline void Router_node::seal(int d, u32 blk)
 /*
  * Reserve one line slot in the block of destination `d` and write the full line there, so that a block in
  * flight never has a hole; seal the block when the reservation lands on its end, the fresh one coming out of
- * the sender's cache, refilled after the seal once empty; wait for that install when another sender is the
+ * the producer's cache, refilled after the seal once empty; wait for that install when another producer is the
  * sealer.  A destination always names a block: connect installs one and every seal replaces it.
- * Reached from Router_Push, by the push that fills the sender's private line for `d`.
+ * Reached from Router_Push, by the push that fills the producer's private line for `d`.
  */
 inline void Router_node::stage_line(Router_thread &s, int d, const Point *line)
 {
@@ -158,7 +158,7 @@ inline void Router_node::stage_line(Router_thread &s, int d, const Point *line)
 	}
 }
 
-/* Sender.  May spin until the Router has room; the point is delivered exactly once. */
+/* Producer.  May spin until the Router has room; the point is delivered exactly once. */
 inline void Router_Push(u64 a, u64 b, int d, Router_thread &rt)
 {
 	Point *line = rt.swc + (size_t) d * rt.swc_linesize;
@@ -177,11 +177,11 @@ inline void Router_Push(u64 a, u64 b, int d, Router_thread &rt)
 }
 
 /*
- * Sender.  Append every partial line's points to its destination's closing buffer, contiguous with the other
- * senders' thanks to the offset a fetch_add hands out, then announce; nothing more from this sender until
+ * Producer.  Append every partial line's points to its destination's closing buffer, contiguous with the other
+ * producers' thanks to the offset a fetch_add hands out, then announce; nothing more from this producer until
  * Router_Reset.  Nothing partial ever enters a block before the F-scan copies the closing buffers into blocks.
- * From here to the round's end the sender is idle, and that is its wait too: a round that goes on once every
- * sender has closed is the receivers' to finish.
+ * From here to the round's end the producer is idle, and that is its wait too: a round that goes on once every
+ * producer has closed is the consumers' to finish.
  */
 inline void Router_Close(Router_thread &rt)
 {
@@ -200,11 +200,11 @@ inline void Router_Close(Router_thread &rt)
 }
 
 
-/******************************** the receiver's calls ********************************/
+/******************************** the consumer's calls ********************************/
 
 /*
- * The next block the receiver's inbox names becomes the one it reads, in place: where its points are and how
- * many.  False when nothing is there, and the time from that to the next block is the receiver's wait,
+ * The next block the consumer's inbox names becomes the one it reads, in place: where its points are and how
+ * many.  False when nothing is there, and the time from that to the next block is the consumer's wait,
  * WAIT_RECV.  Reached from Router_Pop, with no block being read.
  */
 inline bool Router_node::grab(Router_thread &r)
@@ -227,7 +227,7 @@ inline bool Router_node::grab(Router_thread &r)
 	return true;
 }
 
-/* The block being read is read through: onto the free ring, where a sender may install it at once, so nothing
+/* The block being read is read through: onto the free ring, where a producer may install it at once, so nothing
  * of it is read past this call.  The push orders those reads before the block's reuse; the count comes after
  * the push so that it never runs ahead of it: the service compares it with what it handed out.  Reached from
  * Router_Pop, by the pop that takes the block's last point. */
@@ -238,7 +238,7 @@ inline void Router_node::release(Router_thread &r)
 	r.cur_blk = ROUTER_NONE;
 }
 
-/* Receiver.  One point, out of the block being read or the next one; false when nothing is there now.  The
+/* Consumer.  One point, out of the block being read or the next one; false when nothing is there now.  The
  * last point of a block is copied out before the release it triggers: the block may be someone else's right
  * after. */
 inline bool Router_Pop(u64 *a, u64 *b, Router_thread &rt)
@@ -253,7 +253,7 @@ inline bool Router_Pop(u64 *a, u64 *b, Router_thread &rt)
 	return true;
 }
 
-/* Receiver.  Nothing can arrive any more and nothing is left to read, the block being read included: the flag
+/* Consumer.  Nothing can arrive any more and nothing is left to read, the block being read included: the flag
  * first, then emptiness, so that a block pushed between the two reads is still popped.  The round's last wait
  * ends here, no block coming to end it. */
 inline bool Router_Test_drained(Router_thread &rt)

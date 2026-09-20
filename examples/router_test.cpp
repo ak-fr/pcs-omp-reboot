@@ -14,8 +14,8 @@
 #include "router_driver.hpp"
 
 /*
- * The Router's test suite.  Every test is one configuration of the same round: senders push
- * a deterministic stream and close, receivers read blocks in place and verify until drained, the service thread runs
+ * The Router's test suite.  Every test is one configuration of the same round: producers push
+ * a deterministic stream and close, consumers read blocks in place and verify until drained, the service thread runs
  * Router_Progress until quiescent, then rank 0 checks the global accounting.  CHECK, never assert: the
  * build may carry -DNDEBUG.
  */
@@ -31,7 +31,7 @@ static Atomic<int> g_failed(0);
 
 static const u64 SALT = 0x5a17c0ffee5a17ull;
 
-/* the stream of sender s of node `node` in round r: a encodes (r, node, s, i), b encodes a and the dest */
+/* the stream of producer s of node `node` in round r: a encodes (r, node, s, i), b encodes a and the dest */
 static inline u64 point_a(int round, int node, int s, u64 i)
 {
 	return ((u64) round << 56) | ((u64) node << 48) | ((u64) s << 40) | i;
@@ -44,8 +44,8 @@ static inline u64 point_b(u64 a, int dest)
 
 struct Shared {
 	std::vector<u64> sent_to;        /* S * F */
-	std::vector<u64> got;            /* per local receiver */
-	std::vector<u64> seen;           /* per local receiver: a bitmap over (node, s, i) */
+	std::vector<u64> got;            /* per local consumer */
+	std::vector<u64> seen;           /* per local consumer: a bitmap over (node, s, i) */
 	u64 max_points = 0;
 	std::vector<int> t_group;        /* per thread: its Router_group, gathered after Init */
 	std::vector<int> t_cpu;          /* per thread: sched_getcpu() after Init, to check pinning gave it one of its own */
@@ -54,13 +54,13 @@ struct Shared {
 static u64 points_of(const RouterArgs &a, int s)
 {
 	if (a.stagger)
-		return (a.points * (u64) (s + 1)) / (u64) a.senders;
+		return (a.points * (u64) (s + 1)) / (u64) a.producers;
 	return a.points;
 }
 
-static void sender_round(Router_thread &rt, const RouterArgs &a, Shared &sh, int s, int round)
+static void producer_round(Router_thread &rt, const RouterArgs &a, Shared &sh, int s, int round)
 {
-	int F = a.receivers * g_nodes;
+	int F = a.consumers * g_nodes;
 	u64 *sent_to = sh.sent_to.data() + (size_t) s * F;
 	u64 i = 0;
 	if (a.partial) {
@@ -84,7 +84,7 @@ static void sender_round(Router_thread &rt, const RouterArgs &a, Shared &sh, int
 	Router_Close(rt);
 }
 
-/* one delivered point: from this round, from a real sender, to this receiver's rank, and never seen before */
+/* one delivered point: from this round, from a real producer, to this consumer's rank, and never seen before */
 static void check_point(u64 x, u64 y, int me, int S, Shared &sh, u64 *seen, int round)
 {
 	int rnd = (int) (x >> 56);
@@ -99,10 +99,10 @@ static void check_point(u64 x, u64 y, int me, int S, Shared &sh, u64 *seen, int 
 	seen[bit / 64] |= 1ull << (bit % 64);
 }
 
-static void receiver_round(Router_thread &rt, const RouterArgs &a, Shared &sh, int r, int round)
+static void consumer_round(Router_thread &rt, const RouterArgs &a, Shared &sh, int r, int round)
 {
-	int me = g_rank * a.receivers + r;      /* this receiver's global id: the `dest` that reaches it */
-	int S = a.senders;
+	int me = g_rank * a.consumers + r;      /* this consumer's global id: the `dest` that reaches it */
+	int S = a.producers;
 	u64 *seen = sh.seen.data() + (size_t) r * ((g_nodes * S * sh.max_points + 63) / 64);
 	u64 got = 0;
 	for (;;) {
@@ -125,9 +125,9 @@ static void receiver_round(Router_thread &rt, const RouterArgs &a, Shared &sh, i
 /* rank 0's verdict on the round: every point pushed was popped, and what was sent was received */
 static void check_round(const Router_thread &rt, const RouterArgs &a, Shared &sh, int round)
 {
-	int F = a.receivers * g_nodes;
-	int S = a.senders;
-	int R = a.receivers;
+	int F = a.consumers * g_nodes;
+	int S = a.producers;
+	int R = a.consumers;
 	u64 st[ROUTER_STATS_SIZE];
 	Router_Stats(st, rt);
 
@@ -163,38 +163,38 @@ static void check_round(const Router_thread &rt, const RouterArgs &a, Shared &sh
 	CHECK(tot[ROUTER_BYTES_SENT] == tot[ROUTER_BYTES_RECV]);
 	for (int d = 0; d < F; d++)
 		CHECK(tot_sent[d] == tot_got[d]);
-	double send_wait;                        /* share of the round the senders waited for a block */
-	double recv_wait;                        /* share the receivers had nothing to pop */
+	double send_wait;                        /* share of the round the producers waited for a block */
+	double recv_wait;                        /* share the consumers had nothing to pop */
 	double busy;                             /* share the service spent in turns that moved something */
 	const char *limit = Router_Bottleneck(tot, rt, &send_wait, &recv_wait, &busy);
-	if (a.check_limit) {                     /* dawdling receivers over an exhausted pool: the senders wait */
+	if (a.check_limit) {                     /* dawdling consumers over an exhausted pool: the producers wait */
 		CHECK(send_wait > 0.5);
-		CHECK(strcmp(limit, "receivers") == 0);
+		CHECK(strcmp(limit, "consumers") == 0);
 	}
 	if (a.opts.verbose)
 		printf("  round %d: pushed %" PRIu64 " popped %" PRIu64 " local %" PRIu64 " net %" PRIu64
-		       " msgs %" PRIu64 " blocks %" PRIu64 " turns %" PRIu64 " (%" PRIu64 " idle) | wait: senders %.1f%%"
-		       " receivers %.1f%%, service %.1f%% busy --> %s\n",
+		       " msgs %" PRIu64 " blocks %" PRIu64 " turns %" PRIu64 " (%" PRIu64 " idle) | wait: producers %.1f%%"
+		       " consumers %.1f%%, service %.1f%% busy --> %s\n",
 		       round, tot[ROUTER_PUSHED], tot[ROUTER_POPPED], tot[ROUTER_LOCAL], tot[ROUTER_SENT],
 		       tot[ROUTER_MSGS_SENT], tot[ROUTER_BLOCKS], tot[ROUTER_TURNS], tot[ROUTER_IDLE_TURNS],
 		       100. * send_wait, 100. * recv_wait, 100. * busy, limit);
 }
 
 /* rank-local, on thread 0 after Init: the plan the Router built for this node -- the group ids and the
- * pinning.  Which receiver a sender's group holds is PCS's own business (it derives it from Router_group
- * across the team, include/pcs/shared.hpp's assign_receivers), not something this test can see through the
+ * pinning.  Which consumer a producer's group holds is PCS's own business (it derives it from Router_group
+ * across the team, include/pcs/shared.hpp's assign_consumers), not something this test can see through the
  * Router's API, so it only checks the invariant that pairing actually depends on: enough of each role in
  * every group. */
 static void check_placement(const Router_thread &rt, const RouterArgs &a, Shared &sh, bool use_colors)
 {
-	int S = a.senders;
-	int R = a.receivers;
+	int S = a.producers;
+	int R = a.consumers;
 	int nt = 1 + S + R;
 	int G = Router_num_groups(rt);
 	CHECK(G >= 1);
 	CHECK(sh.t_group[0] == -1);                 /* the service has no group */
-	CHECK(Router_size(rt, ROUTER_SENDER, ROUTER_NODE) == S);      /* one role asking about another */
-	CHECK(Router_size(rt, ROUTER_RECEIVER, ROUTER_NODE) == R);
+	CHECK(Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE) == S);      /* one role asking about another */
+	CHECK(Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE) == R);
 	CHECK(Router_size(rt, ROUTER_SERVICE, ROUTER_GLOBAL) == g_nodes);
 	std::vector<int> gs(G, 0);
 	std::vector<int> gr(G, 0);
@@ -225,10 +225,10 @@ static void check_placement(const Router_thread &rt, const RouterArgs &a, Shared
 static void run_config(const RouterArgs &a, const char *name, bool use_colors = false)
 {
 	if (g_rank == 0 && a.opts.verbose)
-		printf("== %s (%d senders, %d receivers, %" PRIu64 " points, %d rounds)\n", name,
-		       a.senders, a.receivers, a.points, a.rounds);
-	int S = a.senders;
-	int R = a.receivers;
+		printf("== %s (%d producers, %d consumers, %" PRIu64 " points, %d rounds)\n", name,
+		       a.producers, a.consumers, a.points, a.rounds);
+	int S = a.producers;
+	int R = a.consumers;
 	int nt = 1 + S + R;
 	Shared sh;
 	sh.max_points = a.partial ? (u64) 7 * R * g_nodes : (a.points > 0 ? a.points : 1);
@@ -241,15 +241,15 @@ static void run_config(const RouterArgs &a, const char *name, bool use_colors = 
 	#pragma omp parallel num_threads(nt)
 	{
 		int tid = omp_get_thread_num();
-		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_RECEIVER : ROUTER_SENDER);
-		int li = (role == ROUTER_RECEIVER) ? (tid - 1) : (tid - 1 - R);   /* the caller's color, in colors mode */
+		int role = (tid == 0) ? ROUTER_SERVICE : (tid <= R ? ROUTER_CONSUMER : ROUTER_PRODUCER);
+		int li = (role == ROUTER_CONSUMER) ? (tid - 1) : (tid - 1 - R);   /* the caller's color, in colors mode */
 		int group = ROUTER_GROUP_AUTO;
 		if (use_colors && role != ROUTER_SERVICE)
 			group = (S >= 2 && R >= 2) ? (li % 2) : 0;
 		Router_thread rt = Router_Init(role, group, MPI_COMM_WORLD, 42, &a.opts);
 		sh.t_group[tid] = Router_group(rt);
 		sh.t_cpu[tid] = sched_getcpu();
-		int per_node = (role == ROUTER_SERVICE) ? 1 : (role == ROUTER_RECEIVER ? R : S);
+		int per_node = (role == ROUTER_SERVICE) ? 1 : (role == ROUTER_CONSUMER ? R : S);
 		int mine = (role == ROUTER_SERVICE) ? 0 : li;                 /* what Router_rank must answer */
 		CHECK(Router_size(rt, role, ROUTER_NODE) == per_node);
 		CHECK(Router_size(rt, role, ROUTER_GLOBAL) == per_node * g_nodes);
@@ -276,10 +276,10 @@ static void run_config(const RouterArgs &a, const char *name, bool use_colors = 
 						MPI_Abort(MPI_COMM_WORLD, 2);
 					}
 				}
-			} else if (role == ROUTER_RECEIVER) {
-				receiver_round(rt, a, sh, tid - 1, round);
+			} else if (role == ROUTER_CONSUMER) {
+				consumer_round(rt, a, sh, tid - 1, round);
 			} else {
-				sender_round(rt, a, sh, tid - 1 - R, round);
+				producer_round(rt, a, sh, tid - 1 - R, round);
 			}
 			#pragma omp barrier               /* the test's own: check_round reads what the workers wrote to sh */
 			if (tid == 0)
@@ -300,8 +300,8 @@ struct PlacementCase {
 	int n_dom;                       /* its cache domains */
 	int n_core;                      /* its cores */
 	int n_cpu;                       /* its PUs, which are the mask the placer is given */
-	int senders;                     /* the team, besides the one service thread */
-	int receivers;
+	int producers;                     /* the team, besides the one service thread */
+	int consumers;
 	int group_size;                  /* cores per group at most */
 };
 
@@ -345,7 +345,7 @@ static int spread(const std::vector<int> &cnt)
  */
 static void check_plan(const RouterPlacement &p, const PlacementCase &c)
 {
-	int nt = 1 + c.senders + c.receivers;
+	int nt = 1 + c.producers + c.consumers;
 	CHECK(p.n_threads == nt);
 	CHECK(p.n_numa_nodes == c.n_numa);
 	CHECK(p.n_domains == c.n_dom);
@@ -384,19 +384,19 @@ static void check_plan(const RouterPlacement &p, const PlacementCase &c)
 	int tol = (nt + pu_per_core - 1 >= c.n_cpu) ? 2 : 1;   /* a team filling every CPU but the service's idle
 	                                                        * siblings: its node has that many PUs fewer for the
 	                                                        * workers, and one role's deal is off by one more */
-	count_by_numa(p, ROUTER_RECEIVER, cnt);
+	count_by_numa(p, ROUTER_CONSUMER, cnt);
 	CHECK(spread(cnt) <= tol);
-	count_by_numa(p, ROUTER_SENDER, cnt);
+	count_by_numa(p, ROUTER_PRODUCER, cnt);
 	CHECK(spread(cnt) <= tol);
 }
 
 /*
  * The groups of a pinned AUTO plan: one cache domain each, every worker in one and the service thread in none,
- * both roles spread over a domain's groups, and every receiver in exactly one group by its local index.
+ * both roles spread over a domain's groups, and every consumer in exactly one group by its local index.
  */
 static void check_groups(const RouterPlacement &p, const PlacementCase &c)
 {
-	int nt = 1 + c.senders + c.receivers;
+	int nt = 1 + c.producers + c.consumers;
 	CHECK(p.n_groups > 0);
 	std::vector<int> gs(p.n_groups, 0);
 	std::vector<int> gr(p.n_groups, 0);
@@ -410,14 +410,14 @@ static void check_groups(const RouterPlacement &p, const PlacementCase &c)
 		if (g < 0 || g >= p.n_groups)
 			return;
 		CHECK(p.group_domain[g] == p.thread_domain[t]);
-		if (p.thread_role[t] == ROUTER_SENDER)
+		if (p.thread_role[t] == ROUTER_PRODUCER)
 			gs[g] += 1;
 		else
 			gr[g] += 1;
 	}
 	for (int g = 0; g < p.n_groups; g++) {
 		CHECK(gs[g] == p.group_nsend[g]);
-		CHECK(gr[g] == (int) p.group_receivers[g].size());
+		CHECK(gr[g] == (int) p.group_consumers[g].size());
 	}
 
 	for (int d = 0; d < c.n_dom; d++) {         /* a domain's groups hold the same of each role, +- 1 */
@@ -436,24 +436,24 @@ static void check_groups(const RouterPlacement &p, const PlacementCase &c)
 		CHECK(spread(dr) <= 1);
 	}
 
-	std::vector<int> seen(c.receivers, 0);      /* the local receiver indices are a partition of 0..R-1 */
+	std::vector<int> seen(c.consumers, 0);      /* the local consumer indices are a partition of 0..R-1 */
 	for (int g = 0; g < p.n_groups; g++)
-		for (size_t k = 0; k < p.group_receivers[g].size(); k++) {
-			int r = p.group_receivers[g][k];
-			CHECK(r >= 0 && r < c.receivers);
-			if (r >= 0 && r < c.receivers)
+		for (size_t k = 0; k < p.group_consumers[g].size(); k++) {
+			int r = p.group_consumers[g][k];
+			CHECK(r >= 0 && r < c.consumers);
+			if (r >= 0 && r < c.consumers)
 				seen[r] += 1;
 		}
-	for (int r = 0; r < c.receivers; r++)
+	for (int r = 0; r < c.consumers; r++)
 		CHECK(seen[r] == 1);
 }
 
 /* the unpinned plan: no CPU and no topology at all, the groups cut out of the worker index, both roles +- 1 */
 static void check_plan_unpinned(const RouterPlacement &p, const PlacementCase &c)
 {
-	int nt = 1 + c.senders + c.receivers;
-	int gs = (c.senders + c.group_size - 1) / c.group_size;
-	int gr = (c.receivers + c.group_size - 1) / c.group_size;
+	int nt = 1 + c.producers + c.consumers;
+	int gs = (c.producers + c.group_size - 1) / c.group_size;
+	int gr = (c.consumers + c.group_size - 1) / c.group_size;
 	CHECK(p.n_groups == std::max(std::max(gs, gr), 1));
 	CHECK(p.n_domains == 0);
 	for (int t = 0; t < nt; t++) {
@@ -471,7 +471,7 @@ static void check_plan_unpinned(const RouterPlacement &p, const PlacementCase &c
 		CHECK(p.thread_group[t] >= 0 && p.thread_group[t] < p.n_groups);
 		if (p.thread_group[t] < 0 || p.thread_group[t] >= p.n_groups)
 			return;
-		if (p.thread_role[t] == ROUTER_SENDER)
+		if (p.thread_role[t] == ROUTER_PRODUCER)
 			ns[p.thread_group[t]] += 1;
 		else
 			nr[p.thread_group[t]] += 1;
@@ -483,7 +483,7 @@ static void check_plan_unpinned(const RouterPlacement &p, const PlacementCase &c
 /* the caller's groups: the color is the group, whatever the domain the thread was pinned in */
 static void check_plan_colors(const RouterPlacement &p, const PlacementCase &c, const std::vector<int> &colors)
 {
-	int nt = 1 + c.senders + c.receivers;
+	int nt = 1 + c.producers + c.consumers;
 	int G = 0;
 	for (int t = 1; t < nt; t++)
 		G = std::max(G, colors[t] + 1);
@@ -499,9 +499,9 @@ static void report_plan(const RouterPlacement &p, const PlacementCase &c)
 {
 	std::vector<int> ns;
 	std::vector<int> nr;
-	count_by_numa(p, ROUTER_SENDER, ns);
-	count_by_numa(p, ROUTER_RECEIVER, nr);
-	printf("== placement (%s, %d senders, %d receivers, %d group(s)):", c.machine, c.senders, c.receivers,
+	count_by_numa(p, ROUTER_PRODUCER, ns);
+	count_by_numa(p, ROUTER_CONSUMER, nr);
+	printf("== placement (%s, %d producers, %d consumers, %d group(s)):", c.machine, c.producers, c.consumers,
 	       p.n_groups);
 	for (int j = 0; j < p.n_numa_nodes; j++)
 		printf("  NUMA %d: %ds %dr", j, ns[j], nr[j]);
@@ -524,11 +524,11 @@ static void test_placement(bool verbose)
 		CPU_ZERO(&mask);
 		for (int cpu = 0; cpu < c.n_cpu; cpu++)
 			CPU_SET(cpu, &mask);
-		int nt = 1 + c.senders + c.receivers;
-		std::vector<int> roles(nt, ROUTER_SENDER);
+		int nt = 1 + c.producers + c.consumers;
+		std::vector<int> roles(nt, ROUTER_PRODUCER);
 		roles[0] = ROUTER_SERVICE;
-		for (int t = 1; t <= c.receivers; t++)
-			roles[t] = ROUTER_RECEIVER;
+		for (int t = 1; t <= c.consumers; t++)
+			roles[t] = ROUTER_CONSUMER;
 		std::vector<int> autos(nt, ROUTER_GROUP_AUTO);
 
 		RouterPlacement pinned(mask, roles, autos, true, 0, c.group_size, 0);
@@ -626,7 +626,7 @@ int main(int argc, char **argv)
 		c.points = a.points / 20;
 		run_config(c, "slow_recv");
 	}
-	if (all || a.test == "limits") {  /* tiny blocks exhaust the pool and dawdling receivers hold them: the senders wait */
+	if (all || a.test == "limits") {  /* tiny blocks exhaust the pool and dawdling consumers hold them: the producers wait */
 		RouterArgs c = a;
 		c.opts.block_points = 8;
 		c.opts.swc_linesize = 4;
@@ -649,11 +649,11 @@ int main(int argc, char **argv)
 	}
 	if ((all && g_nodes == 1) || a.test == "asymmetric") {
 		RouterArgs c = a;
-		c.senders = 1;
-		c.receivers = 6;
+		c.producers = 1;
+		c.consumers = 6;
 		run_config(c, "asymmetric");
-		c.senders = 6;
-		c.receivers = 1;
+		c.producers = 6;
+		c.consumers = 1;
 		run_config(c, "asymmetric");
 	}
 

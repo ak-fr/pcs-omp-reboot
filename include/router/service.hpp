@@ -47,18 +47,18 @@ inline bool Router_node::complete(u32 blk)
 }
 
 /*
- * A block to its destination's owner: the local receiver's inbox, or an Isend from block memory to its node.
+ * A block to its destination's owner: the local consumer's inbox, or an Isend from block memory to its node.
  * True == the block changed hands, and the caller must forget it.  False == no room: the inbox is full, or
  * no send slot is free, or the peer has its credit in flight.
  * Reached from Router_Progress, for every block dispatched and every parked block retried.
  */
 inline bool Router_node::place(int d, u32 blk, u32 count)
 {
-	int node = d / R;
-	int local = d % R;
+	int node = d / C;
+	int local = d % C;
 	if (node == rank) {
 		RouterBlockMsg e = {blk, count};
-		if (not receivers[local]->inbox.push(e))
+		if (not consumers[local]->inbox.push(e))
 			return false;
 		inbox_pushed[local] += 1;
 		ctr[ROUTER_LOCAL] += count;
@@ -103,12 +103,12 @@ inline void Router_node::release(u32 blk)
 }
 
 /* keep a block whose target is full, in arrival order, until the target has room; parking rather than
- * refusing to pop is what keeps one slow receiver from stalling every other destination.  Reached from
+ * refusing to pop is what keeps one slow consumer from stalling every other destination.  Reached from
  * Router_Progress, when a block finds its inbox full or its peer out of slots or credit. */
 inline void Router_node::park(int d, u32 blk, u32 count)
 {
-	int node = d / R;
-	int target = (node == rank) ? d % R : R + node;
+	int node = d / C;
+	int target = (node == rank) ? d % C : C + node;
 	blk_count[blk] = count;
 	blk_link[blk] = ((u64) d << 32) | ROUTER_NONE;
 	if (park_head[target] == ROUTER_NONE)
@@ -167,7 +167,7 @@ inline void Router_node::poll_out()
 }
 
 /* post a block from the stash on receive slot k; none == the slot idles, and repost_idle retries every turn.
- * Reached from Router_Progress (a slot whose DATA block went to its receiver, and the idle slots, every slot on
+ * Reached from Router_Progress (a slot whose DATA block went to its consumer, and the idle slots, every slot on
  * the first turn) and Router_Reset (the idle slots). */
 inline void Router_node::repost(int k)
 {
@@ -193,7 +193,7 @@ inline void Router_node::repost_idle()
 }
 
 /*
- * Take delivery of what arrived: an END is recorded and its block reposted; a DATA block goes to its receiver
+ * Take delivery of what arrived: an END is recorded and its block reposted; a DATA block goes to its consumer
  * as it is -- parked if the inbox is full -- and its slot gets a fresh block.
  * Reached from Router_Progress, every turn.
  */
@@ -224,7 +224,7 @@ inline void Router_node::poll_in()
 		n_data_recv[src] += 1;
 		ctr[ROUTER_RECV] += h.count;
 		in_blk[k] = ROUTER_NONE;
-		dispatch(rank * R + (int) h.dest, blk, h.count);
+		dispatch(rank * C + (int) h.dest, blk, h.count);
 		repost(k);
 	}
 }
@@ -249,7 +249,7 @@ inline void Router_node::sweep()
 }
 
 /*
- * Destination `d` at closure, once every sender is closed: what its installed block holds, and how many
+ * Destination `d` at closure, once every producer is closed: what its installed block holds, and how many
  * points its closing buffer holds.
  * Reached from Router_Progress in the F-scan phase, once per destination and round.
  */
@@ -326,7 +326,7 @@ inline bool Router_node::flush_all()
 	for (int p = 0; p < n_nodes; p++) {
 		if (p == rank)
 			continue;
-		if (park_head[R + p] != ROUTER_NONE) {
+		if (park_head[C + p] != ROUTER_NONE) {
 			done = false;
 			continue;
 		}
@@ -349,7 +349,7 @@ inline bool Router_node::flush_all()
 	return done;
 }
 
-/* nothing can enter an inbox any more: local flush done, no block parked on a receiver, every peer's END and
+/* nothing can enter an inbox any more: local flush done, no block parked on a consumer, every peer's END and
  * all its DATA in.  The END's seq is compared with the DATA count because MPI orders matching, not
  * completion, across posted receives.  Reached from Router_Progress, every turn; a no-op before the flushing
  * phase. */
@@ -357,7 +357,7 @@ inline void Router_node::check_input_closed()
 {
 	if (phase < ROUTER_FLUSHING)
 		return;
-	for (int r = 0; r < R; r++)
+	for (int r = 0; r < C; r++)
 		if (park_head[r] != ROUTER_NONE)
 			return;
 	for (int p = 0; p < n_nodes; p++)
@@ -366,27 +366,27 @@ inline void Router_node::check_input_closed()
 	input_closed.store_release(1);
 }
 
-/* out closed, input closed, and every block handed to a receiver given back: nobody holds anything.  The
- * receiver's count is plain and read racily; it is written after the push it counts, so it is never early.
+/* out closed, input closed, and every block handed to a consumer given back: nobody holds anything.  The
+ * consumer's count is plain and read racily; it is written after the push it counts, so it is never early.
  * Reached from Router_Progress, every turn; a no-op until the output side is closed and the input closed. */
 inline void Router_node::check_quiescent()
 {
 	if (phase != ROUTER_OUT_CLOSED || input_closed == 0)
 		return;
-	for (int r = 0; r < R; r++)
-		if (inbox_pushed[r] != receivers[r]->ctr[ROUTER_BLOCKS])
+	for (int r = 0; r < C; r++)
+		if (inbox_pushed[r] != consumers[r]->ctr[ROUTER_BLOCKS])
 			return;
 	quiescent = true;
 }
 
 /* the output side's phases, one step per turn at most.  Reached from Router_Progress, every turn; a phase
- * advances only once its condition holds, the first being every sender closed. */
+ * advances only once its condition holds, the first being every producer closed. */
 inline void Router_node::closure()
 {
 	switch (phase) {
 	case ROUTER_OPEN:
-		for (int s = 0; s < S; s++)
-			if (senders[s]->closed.load_acquire() == 0)
+		for (int s = 0; s < P; s++)
+			if (producers[s]->closed.load_acquire() == 0)
 				return;
 		phase = ROUTER_COLLECTING;
 		return;
@@ -423,7 +423,7 @@ inline void Router_Progress(Router_thread &rt)
 	u64 before = rn.ctr[ROUTER_BLOCKS] + rn.ctr[ROUTER_MSGS_SENT] + rn.ctr[ROUTER_MSGS_RECV] + rn.ctr[ROUTER_RECV]
 	           + rn.ctr[ROUTER_LOCAL] + rn.ctr[ROUTER_STALL_OUT];
 	rn.poll_out();
-	for (int t = 0; t < rn.R + rn.n_nodes; t++)
+	for (int t = 0; t < rn.C + rn.n_nodes; t++)
 		rn.retry_parked(t);
 	rn.poll_in();
 	rn.repost_idle();
@@ -457,14 +457,14 @@ inline void Router_Dump(FILE *f, const Router_thread &rt)
 	        " send slots free %zu\n", rn.rank, rn.round, rn.phase, rn.input_closed.load(), (int) rn.quiescent,
 	        rn.flush_d, rn.flush_off, rn.flush_len, rn.pending.size(), rn.sealed_top.load(),
 	        rn.free_list.size(), in - out, in, out, rn.out_free.size());
-	for (int s = 0; s < rn.S; s++) {
-		Router_thread &sd = *rn.senders[s];
-		fprintf(f, "  sender %d (grp %d cpu %d): closed %u pushed %" PRIu64 " cached %u\n", s,
+	for (int s = 0; s < rn.P; s++) {
+		Router_thread &sd = *rn.producers[s];
+		fprintf(f, "  producer %d (grp %d cpu %d): closed %u pushed %" PRIu64 " cached %u\n", s,
 		        sd.group, sd.cpu, sd.closed.load(), sd.ctr[ROUTER_PUSHED], sd.cache_n);
 	}
-	for (int r = 0; r < rn.R; r++) {
-		Router_thread &rr = *rn.receivers[r];
-		fprintf(f, "  receiver %d (grp %d cpu %d): inbox %zu/%zu cur %u (%u/%u) pushed %" PRIu64 " given back %"
+	for (int r = 0; r < rn.C; r++) {
+		Router_thread &rr = *rn.consumers[r];
+		fprintf(f, "  consumer %d (grp %d cpu %d): inbox %zu/%zu cur %u (%u/%u) pushed %" PRIu64 " given back %"
 		        PRIu64 " parked %u\n", r, rr.group, rr.cpu, (size_t) rr.inbox.head.load(),
 		        (size_t) rr.inbox.tail.load(), rr.cur_blk, rr.cur_off, rr.cur_count, rn.inbox_pushed[r],
 		        rr.ctr[ROUTER_BLOCKS], rn.park_head[r]);
@@ -482,7 +482,7 @@ inline void Router_Dump(FILE *f, const Router_thread &rt)
 			continue;
 		fprintf(f, "  peer %d: seq_sent %" PRIu64 " n_data_recv %" PRIu64 " end_seq %lld end_sent %d end_req %d"
 		        " credit_used %d parked %u\n", p, rn.seq_sent[p], rn.n_data_recv[p], rn.end_seq[p],
-		        (int) rn.end_sent[p], rn.end_req[p] != MPI_REQUEST_NULL, rn.credit_used[p], rn.park_head[rn.R + p]);
+		        (int) rn.end_sent[p], rn.end_req[p] != MPI_REQUEST_NULL, rn.credit_used[p], rn.park_head[rn.C + p]);
 	}
 	for (int k = 0; k < rn.opt.n_recv; k++) {
 		if (rn.out_blk[k] != ROUTER_NONE)
@@ -493,7 +493,7 @@ inline void Router_Dump(FILE *f, const Router_thread &rt)
 	fflush(f);
 }
 
-/* Service.  This node has sent and received everything of the round and its receivers hold nothing. */
+/* Service.  This node has sent and received everything of the round and its consumers hold nothing. */
 inline bool Router_Test_quiescent(const Router_thread &rt)
 {
 	return rt.node.quiescent;
@@ -514,17 +514,17 @@ inline void Router_Stats(u64 *stats, const Router_thread &rt)
 	rn.ctr[ROUTER_ELAPSED] = rn.ctr[ROUTER_TURNS] ? now - rn.t_round : 0;
 	for (int k = 0; k < ROUTER_STATS_SIZE; k++)
 		stats[k] = rn.ctr[k];
-	for (int s = 0; s < rn.S; s++) {
+	for (int s = 0; s < rn.P; s++) {
 		for (int k = 0; k < ROUTER_STATS_SIZE; k++)
-			stats[k] += rn.senders[s]->ctr[k];
-		u64 since = rn.senders[s]->wait_since;
+			stats[k] += rn.producers[s]->ctr[k];
+		u64 since = rn.producers[s]->wait_since;
 		if (since != 0 && (int64_t) (now - since) > 0)
 			stats[ROUTER_WAIT_SEND] += now - since;
 	}
-	for (int r = 0; r < rn.R; r++) {
+	for (int r = 0; r < rn.C; r++) {
 		for (int k = 0; k < ROUTER_STATS_SIZE; k++)
-			stats[k] += rn.receivers[r]->ctr[k];
-		u64 since = rn.receivers[r]->wait_since;
+			stats[k] += rn.consumers[r]->ctr[k];
+		u64 since = rn.consumers[r]->wait_since;
 		if (since != 0 && (int64_t) (now - since) > 0)
 			stats[ROUTER_WAIT_RECV] += now - since;
 	}
@@ -533,12 +533,12 @@ inline void Router_Stats(u64 *stats, const Router_thread &rt)
 /*
  * Any thread.  What limits the flow, read off a Router_Stats array -- one node's, or the sum of several nodes',
  * ELAPSED being then summed as many times, so that the per-node counts below divide right: the share of the round
- * the senders spent without pushing -- waiting for a free block, or closed --, the receivers with nothing to pop
- * and the service in turns that moved something, each in [0, 1]; and the verdict.  "senders" when they never waited and the receivers did:
- * the points are produced too slowly.  "receivers" the other way round: they are consumed too slowly.
+ * the producers spent without pushing -- waiting for a free block, or closed --, the consumers with nothing to pop
+ * and the service in turns that moved something, each in [0, 1]; and the verdict.  "producers" when they never waited and the consumers did:
+ * the points are produced too slowly.  "consumers" the other way round: they are consumed too slowly.
  * "service/network" when both waited for the Router: the blocks are in flight or in the service's hands, and
  * *busy says which -- near 1 the service's CPU, well below it the wire or the credit.  "balanced" when neither
- * waited.  Meaningful for a round long against its closure: the drain is receiver wait.
+ * waited.  Meaningful for a round long against its closure: the drain is consumer wait.
  */
 inline const char *Router_Bottleneck(const u64 *stats, const Router_thread &rt, double *send_wait,
                                      double *recv_wait, double *busy)
@@ -549,18 +549,18 @@ inline const char *Router_Bottleneck(const u64 *stats, const Router_thread &rt, 
 	*recv_wait = 0;
 	*busy = 0;
 	if (elapsed > 0) {
-		*send_wait = std::min(1., (double) stats[ROUTER_WAIT_SEND] / (rn.S * elapsed));
-		*recv_wait = std::min(1., (double) stats[ROUTER_WAIT_RECV] / (rn.R * elapsed));
+		*send_wait = std::min(1., (double) stats[ROUTER_WAIT_SEND] / (rn.P * elapsed));
+		*recv_wait = std::min(1., (double) stats[ROUTER_WAIT_RECV] / (rn.C * elapsed));
 		*busy = std::min(1., (double) stats[ROUTER_BUSY] / elapsed);
 	}
-	bool senders_wait = *send_wait >= ROUTER_WAIT_THRESHOLD;
-	bool receivers_wait = *recv_wait >= ROUTER_WAIT_THRESHOLD;
-	if (senders_wait && receivers_wait)
+	bool producers_wait = *send_wait >= ROUTER_WAIT_THRESHOLD;
+	bool consumers_wait = *recv_wait >= ROUTER_WAIT_THRESHOLD;
+	if (producers_wait && consumers_wait)
 		return "service/network";
-	if (senders_wait)
-		return "receivers";
-	if (receivers_wait)
-		return "senders";
+	if (producers_wait)
+		return "consumers";
+	if (consumers_wait)
+		return "producers";
 	return "balanced";
 }
 
@@ -579,8 +579,8 @@ inline void Router_node::reset_round()
 	for (int k = 0; k < opt.n_recv; k++)
 		if (in_blk[k] != ROUTER_NONE)
 			accounted += 1;
-	for (int s = 0; s < S; s++)
-		accounted += senders[s]->cache_n;
+	for (int s = 0; s < P; s++)
+		accounted += producers[s]->cache_n;
 	u64 out = free_out.load();         /* the ring, nobody else touching it now: exact, and every cell ready */
 	u64 in = free_in.load();
 	for (u64 p = out; p < in; p++)
@@ -605,7 +605,7 @@ inline void Router_node::reset_round()
 #endif
 	for (int k = 0; k < ROUTER_STATS_SIZE; k++)
 		ctr[k] = 0;
-	for (int r = 0; r < R; r++)
+	for (int r = 0; r < C; r++)
 		inbox_pushed[r] = 0;
 	for (int p = 0; p < n_nodes; p++) {
 		seq_sent[p] = 0;
@@ -636,8 +636,8 @@ inline void Router_node::reset_round()
 inline void Router_Reset(Router_thread &rt)
 {
 	Router_node &rn = rt.node;
-	if (rt.role == ROUTER_RECEIVER && rt.cur_blk != ROUTER_NONE)
-		errx(1, "Router_Reset: a receiver stopped popping before it was drained");
+	if (rt.role == ROUTER_CONSUMER && rt.cur_blk != ROUTER_NONE)
+		errx(1, "Router_Reset: a consumer stopped popping before it was drained");
 	#pragma omp barrier                   /* every worker is out of the round: nothing cleared below is read */
 	if (rt.role != ROUTER_SERVICE) {
 		for (int k = 0; k < ROUTER_STATS_SIZE; k++)
