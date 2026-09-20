@@ -16,16 +16,15 @@ transport with the other.
 The **direct** engine is the exhaustive meet-in-the-middle: a round is two phases, `f`
 fills the dictionary on a chunk of the domain, then `g` probes it on the whole domain;
 `ceil(2^n / (fill * w))` rounds cover the domain, and finding nothing is a proof of
-absence.  `PROTOCOL.md` §1 is its specification.
+absence.
 
 **PCS** is van Oorschot–Wiener parallel collision search over a dictionary of
 distinguished points: the problem becomes one random function per round, and the
 walkers' trails end at distinguished points that fill the dictionary.  A round ends on
 a count no single node holds, so PCS keeps a controller on rank 0 and a control channel
-to reach it; it is Monte-Carlo, so "not found" is never a proof.  `PROTOCOL.md` §2 is
-its specification.
+to reach it; it is Monte-Carlo, so "not found" is never a proof.
 
-The **Router** (`include/router/`, spec `router.3`, `man -l router.3`) is the transport
+The **Router** (`include/router/`) is the transport
 underneath both engines: it carries pairs of `u64` from sender threads to globally
 numbered receiver threads across ranks, and it owns thread placement.
 
@@ -71,12 +70,11 @@ mpirun -np 4 --bind-to none build/examples/double_speck64_demo \
 - `--producers-per-node` / `--dicts-per-node` size the team.  Producers default to
   filling whatever affinity mask the launcher handed the rank, which is why
   `--bind-to none` matters
-- **the Router pins the threads and forms its groups itself**, and prints both the
-  planned and the measured layout.  `--no-bind` turns pinning off, which is what two
-  ranks sharing a host need (the Router refuses to pin overlapping masks);
-  `--cache-level` and `--group` are its group knobs
+- **the Router pins the threads itself**, and prints both the planned and the
+  measured layout.  `--no-bind` turns pinning off, which is what two ranks sharing a
+  host need (the Router refuses to pin overlapping masks)
 - `--block`, `--swc`, `--n-recv`, `--inbox`, `--credit` tune the transport;
-  `router.3` documents each of them
+  `include/router/common.hpp` documents each of them
 
 A smoke test that runs in well under a second:
 
@@ -100,8 +98,8 @@ include/
                      (direct.hpp is the umbrella)
   pcs/               PCS: params, shared, wrappers, trail, dict, walker, control, engine
                      (pcs.hpp is the umbrella)
-  router/            the Router: ring, common, placement, connect, workers, service
-                     (router.hpp is the umbrella; router.3 at the root is its man page)
+  router/            the Router: topology, ring, common, placement, connect, workers, service
+                     (router.hpp is the umbrella)
 examples/
   driver.hpp             command line + MPI startup, shared by every example
   benchmark.hpp          f/g throughput per rank and across ranks: every driver's --benchmark
@@ -123,10 +121,6 @@ Recurring notation: `n` = domain bits, `m` = range bits, `w` = dictionary slots,
 
 ## Documents
 
-- `router.3` — the Router's interface, the authoritative reference for it.
-- `PROTOCOL.md` — the bible of the two engines: §1 specifies the direct engine, §2
-  specifies PCS.  Kept in sync with the code in the same commit as any change to a
-  round's lifecycle, the wire format, a barrier, the control channel or loss semantics.
 - `PROBLEM.md` — the measurements that showed the single comm thread was the
   bottleneck, which is why the Router exists.
 - `FINDINGS.md` — one section per profiling session on Grid'5000.

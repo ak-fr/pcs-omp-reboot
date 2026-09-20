@@ -174,9 +174,9 @@ Two things this has to get right:
 
 Over A this buys: no shared-memory copy for intra-node traffic, one dictionary and one
 round barrier per node instead of 16, and `O(R^2 N)` buffers instead of `O((16N)^2)`.
-It costs a real `PROTOCOL.md` rewrite -- a `ROUTER` role in §1, new channels in §3,
-the `TAG_POINTS` addressing and wire layout in §2, and a new stage in the §4.5 drain
-(routers must quiesce after the walkers and before the buffers flush).
+It costs a real protocol rewrite -- a `ROUTER` role, new channels, the `TAG_POINTS`
+addressing and wire layout, and a new stage in the drain (routers must quiesce after
+the walkers and before the buffers flush).
 
 **Measure A first.**  It is the same architecture implemented by the MPI runtime, and
 it bounds what B is worth before anyone spends a protocol rewrite on it.
@@ -238,7 +238,7 @@ Each multiplies whatever parallel routing gives.
 **Re-measured on a different node in §8**, which supersedes section 1 for anything but
 `grdix-4` itself.  The original note stands:
 
-The resolver is now batched (`PROTOCOL.md` §3.2), so walkers stay near their
+The resolver is now batched, so walkers stay near their
 empty-dictionary rate much further into a round than they did when these runs were
 taken -- which means they will offer *more* points and reach the router's ceiling
 sooner, not later.  Everything in section 1 should be re-run before it is quoted.
@@ -301,7 +301,7 @@ overfill an almost-empty dictionary.  Read §8.4 instead.
 ### 8.3 `push_bulk`: implemented, and worth nothing
 
 §5.C's first bullet is in the tree (`SPSCQueue::push_bulk`, per-shard buckets of 128 in
-`CommThread`, PROTOCOL.md §3.1).  Same seed, same configuration, before -> after:
+`CommThread`).  Same seed, same configuration, before -> after:
 
 | inserters | inserted | walker-queue drops | inserter-queue drops |
 |---|---|---|---|
