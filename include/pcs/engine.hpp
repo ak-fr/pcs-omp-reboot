@@ -341,6 +341,9 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 			shared.chan[me].q = std::make_unique<CollisionQueue>(params.coll_queue_capacity);
 		}
 		if (role == ROUTER_PRODUCER) {
+			const int C = Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE);
+			for (int r = 0; r < C; r++)
+				shared.closeness[me * C + r] = Router_closeness(rt, ROUTER_CONSUMER, r);
 			hll.assign(HLL_REGISTERS, 0);
 			shared.hll[tid] = hll.data();
 		}
@@ -351,18 +354,18 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 			control->begin_round();
 		}
 
-		#pragma omp barrier    /* the queues and the registers are the team's to read now */
+		#pragma omp barrier    /* the closeness rows, the queues and the registers are the team's to read now */
 
 		/*
 		 * Which dict thread this walker resolves for.  Every thread runs the same deterministic pass over
-		 * the Router's closeness; thread 0 runs it to check that no shard was left without a walker,
+		 * the published closeness rows; thread 0 runs it to check that no shard was left without a walker,
 		 * which would silently drop every collision it found.
 		 */
 		int chan = me;                 /* the channel this thread works: a dict thread's own, a walker's assigned */
 		if (role != ROUTER_CONSUMER) {
 			consumer_of.assign(Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE), -1);
 			n_walkers.assign(Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE), 0);
-			assign_consumers(rt, consumer_of.data(), n_walkers.data());
+			assign_consumers(rt, shared.closeness.data(), consumer_of.data(), n_walkers.data());
 		}
 		if (role == ROUTER_PRODUCER)
 			chan = consumer_of[me];

@@ -331,26 +331,26 @@ inline void Router_node::banner() const
 }
 
 /*
- * Any thread, about two threads of its node, each a (role, index): the depth of the deepest object of the
- * machine's hierarchy holding both their CPUs, 0 the whole machine, larger closer, a thread with itself the
- * deepest of all; 0 for every pair when the threads are not pinned.  Ordinal only: hwloc merges the levels a
- * machine has one of, so no depth names a level.  The one thing the Router says about where it put the threads.
- * The indices are the caller's to keep in range, as for Router_size.
+ * Any thread, about itself and the thread of `role` and local rank `index` on its node: the depth of the deepest
+ * object of the machine's hierarchy holding both their CPUs, 0 the whole machine, larger closer, the caller with
+ * itself the deepest of all; 0 for every pair when the threads are not pinned.  Ordinal only: hwloc merges the
+ * levels a machine has one of, so no depth names a level.  The one thing the Router says about where it put the
+ * threads.  The index is the caller's to keep in range, as for Router_size.
  */
-inline int Router_closeness(const Router_thread &rt, int role_a, int a, int role_b, int b)
+inline int Router_closeness(const Router_thread &rt, int role, int index)
 {
 	const Router_node &rn = rt.node;
-	int ta = 0;
-	if (role_a == ROUTER_PRODUCER)
-		ta = rn.producer_tid[a];
-	else if (role_a == ROUTER_CONSUMER)
-		ta = rn.consumer_tid[a];
-	int tb = 0;
-	if (role_b == ROUTER_PRODUCER)
-		tb = rn.producer_tid[b];
-	else if (role_b == ROUTER_CONSUMER)
-		tb = rn.consumer_tid[b];
-	return rn.plan.closeness(ta, tb);
+	int me = 0;
+	if (rt.role == ROUTER_PRODUCER)
+		me = rn.producer_tid[rt.index];
+	else if (rt.role == ROUTER_CONSUMER)
+		me = rn.consumer_tid[rt.index];
+	int other = 0;
+	if (role == ROUTER_PRODUCER)
+		other = rn.producer_tid[index];
+	else if (role == ROUTER_CONSUMER)
+		other = rn.consumer_tid[index];
+	return rn.plan.closeness(me, other);
 }
 
 /* Any thread.  The threads of `role` on this node (ROUTER_NODE) or over every node (ROUTER_GLOBAL). */

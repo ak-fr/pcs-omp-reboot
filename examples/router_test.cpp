@@ -49,6 +49,7 @@ struct Shared {
 	std::vector<u64> seen;           /* per local consumer: a bitmap over (node, s, i) */
 	u64 max_points = 0;
 	std::vector<int> t_cpu;          /* per thread: sched_getcpu() after Init, to check pinning gave it one of its own */
+	std::vector<int> t_close;        /* per thread, its Router_closeness to every thread of the team, nt entries each */
 };
 
 static u64 points_of(const RouterArgs &a, int s)
@@ -181,8 +182,8 @@ static void check_round(const Router_thread &rt, const RouterArgs &a, Shared &sh
 }
 
 /* rank-local, on thread 0 after Init: the team's shape as the Router answers it, a CPU of its own for every
- * thread when pinned, and Router_closeness's invariants: symmetric, a thread closest to itself, and 0 for every
- * pair when the threads are not pinned.  Which consumer a producer pairs with is PCS's own business (it derives
+ * thread when pinned, and Router_closeness's invariants over the rows every thread published: symmetric, a
+ * thread closest to itself, and 0 for every pair when the threads are not pinned.  Which consumer a producer pairs with is PCS's own business (it derives
  * it from Router_closeness, include/pcs/shared.hpp's assign_consumers), which test_placement checks on
  * synthetic machines. */
 static void check_placement(const Router_thread &rt, const RouterArgs &a, Shared &sh)
@@ -197,12 +198,12 @@ static void check_placement(const Router_thread &rt, const RouterArgs &a, Shared
 		for (int t = 0; t < nt; t++)
 			for (int u = t + 1; u < nt; u++)
 				CHECK(sh.t_cpu[t] != sh.t_cpu[u]);   /* every thread on a CPU of its own */
-	for (int s = 0; s < P; s++) {
-		int self = Router_closeness(rt, ROUTER_PRODUCER, s, ROUTER_PRODUCER, s);
+	for (int t = 0; t < nt; t++) {
+		int self = sh.t_close[t * nt + t];
 		CHECK(a.opts.pin ? self > 0 : self == 0);
-		for (int r = 0; r < C; r++) {
-			int close = Router_closeness(rt, ROUTER_PRODUCER, s, ROUTER_CONSUMER, r);
-			CHECK(close == Router_closeness(rt, ROUTER_CONSUMER, r, ROUTER_PRODUCER, s));
+		for (int u = 0; u < nt; u++) {
+			int close = sh.t_close[t * nt + u];
+			CHECK(close == sh.t_close[u * nt + t]);
 			CHECK(close <= self);
 			CHECK(a.opts.pin || close == 0);
 		}
@@ -224,6 +225,7 @@ static void run_config(const RouterArgs &a, const char *name)
 	sh.got.assign(R, 0);
 	sh.seen.assign((size_t) R * ((g_nodes * S * sh.max_points + 63) / 64), 0);
 	sh.t_cpu.assign(nt, 0);
+	sh.t_close.assign((size_t) nt * nt, 0);
 
 	#pragma omp parallel num_threads(nt)
 	{
@@ -232,6 +234,11 @@ static void run_config(const RouterArgs &a, const char *name)
 		int li = (role == ROUTER_CONSUMER) ? (tid - 1) : (tid - 1 - R);   /* my local rank, when a worker */
 		Router_thread rt = Router_Init(role, MPI_COMM_WORLD, 42, &a.opts);
 		sh.t_cpu[tid] = sched_getcpu();
+		sh.t_close[tid * nt] = Router_closeness(rt, ROUTER_SERVICE, 0);    /* my row: thread 0, the consumers, the producers */
+		for (int r = 0; r < R; r++)
+			sh.t_close[tid * nt + 1 + r] = Router_closeness(rt, ROUTER_CONSUMER, r);
+		for (int s = 0; s < S; s++)
+			sh.t_close[tid * nt + 1 + R + s] = Router_closeness(rt, ROUTER_PRODUCER, s);
 		int per_node = (role == ROUTER_SERVICE) ? 1 : (role == ROUTER_CONSUMER ? R : S);
 		int mine = (role == ROUTER_SERVICE) ? 0 : li;                 /* what Router_rank must answer */
 		CHECK(Router_size(rt, role, ROUTER_NODE) == per_node);

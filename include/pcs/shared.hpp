@@ -198,6 +198,7 @@ struct alignas(64) CollChannel {
 /* what a rank's threads share.  Built before the team; every per-thread object is its owner's own */
 struct Shared {
 	std::vector<Tally> tally;              /* per OpenMP thread id */
+	std::vector<int> closeness;            /* per walker, by local rank, its Router_closeness to every dict thread: C entries each */
 	std::vector<u8 *> hll;                 /* each walker's own registers; NULL for the other roles */
 	std::vector<CollChannel> chan;         /* per dict thread */
 	Atomic<u32> round_over{0};             /* the controller closed the round: the walkers stop walking */
@@ -209,7 +210,7 @@ struct Shared {
 
 	/* the team's n_threads: the service, the R dict threads, then the walkers */
 	Shared(int n_threads, int R)
-		: tally(n_threads), hll(n_threads, NULL), chan(R) {}
+		: tally(n_threads), closeness((size_t) (n_threads - 1 - R) * R, 0), hll(n_threads, NULL), chan(R) {}
 
 	/* a walker's golden pair; the first one wins */
 	void set_golden(u64 i, u64 x0, u64 x1)
@@ -228,13 +229,14 @@ struct Shared {
 /**************************** walkers to dict threads ***************************/
 
 /*
- * Which dict thread each walker resolves for: the closest in the machine's hierarchy (Router_closeness), the
- * least loaded among the closest, the lowest index among those, the walkers taken in order.  A walker thus
- * serves the dict thread of its own core, cache or NUMA node, so the queue and the two threads touching it stay
- * together; unpinned, every closeness is 0 and this is a plain round-robin.  Deterministic from the Router
- * alone, so every thread runs it and gets the same answer.
+ * Which dict thread each walker resolves for: the closest in the machine's hierarchy, the least loaded among the
+ * closest, the lowest index among those, the walkers taken in order.  A walker thus serves the dict thread of
+ * its own core, cache or NUMA node, so the queue and the two threads touching it stay together; unpinned, every
+ * closeness is 0 and this is a plain round-robin.  `closeness` is the Shared's: each walker's Router_closeness
+ * to every dict thread, C entries per walker by local rank, published before the startup barrier.
+ * Deterministic from those alone, so every thread runs it and gets the same answer.
  */
-static void assign_consumers(const Router_thread &rt, int consumer_of[], int n_walkers[])
+static void assign_consumers(const Router_thread &rt, const int closeness[], int consumer_of[], int n_walkers[])
 {
 	const int C = Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE);
 	const int P = Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE);
@@ -242,9 +244,9 @@ static void assign_consumers(const Router_thread &rt, int consumer_of[], int n_w
 		n_walkers[r] = 0;
 	for (int s = 0; s < P; s++) {
 		int best = 0;
-		int best_close = Router_closeness(rt, ROUTER_PRODUCER, s, ROUTER_CONSUMER, 0);
+		int best_close = closeness[s * C];
 		for (int r = 1; r < C; r++) {
-			int close = Router_closeness(rt, ROUTER_PRODUCER, s, ROUTER_CONSUMER, r);
+			int close = closeness[s * C + r];
 			if (close > best_close || (close == best_close && n_walkers[r] < n_walkers[best])) {
 				best = r;
 				best_close = close;
