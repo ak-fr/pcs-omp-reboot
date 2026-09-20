@@ -43,9 +43,12 @@ enum router_stat {
 struct Router_Opts {
 	size_t block_points = 16384;        /* points per block, a power of two >= 4: one block is one message */
 	size_t swc_linesize = 0;            /* points per private write-combining line, 4..block_points; 0 == auto */
-	int n_recv = 32;                    /* always-posted MPI_Irecv(ANY_SOURCE) slots, and as many send slots */
+	int n_recv = 0;                     /* always-posted MPI_Irecv(ANY_SOURCE) slots, and as many send slots;
+	                                       0 == auto: two a peer, at least 16 */
 	int inbox_blocks = 64;              /* a consumer's inbox, in blocks */
-	int credit = 4;                     /* blocks in flight to one peer at most: a stalled peer hogs no send slot */
+	int credit = 2;                     /* blocks in flight to one peer at most: a stalled peer hogs no send slot.
+	                                       Two in flight is what saturates a link; more is useless, and more
+	                                       than n_recv / peers collapses the rate */
 	bool pin = true;                    /* pin the threads, or leave the CPUs to the caller */
 	bool verbose = true;                /* rank 0 prints the sizes once connected */
 };

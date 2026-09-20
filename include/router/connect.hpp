@@ -98,6 +98,17 @@ inline void Router_node::connect()
 			consumer_tid.push_back((int) t);
 		}
 	}
+	/* The windows follow the communicator, and every node derives the same ones from it.  Two messages in
+	 * flight a peer is what saturates a link, measured on raw MPI and on the Router alike; the same count
+	 * sizes the send slots, so a credit that wants more blocks in flight than there are slots collapses the
+	 * rate -- 24 GB/s a node at 28 in flight of 32 slots, 12.4 at 56, 7.2 at 224. */
+	if (opt.n_recv == 0)
+		opt.n_recv = n_nodes > 1 ? std::max(16, 2 * (n_nodes - 1)) : 16;
+	if (n_nodes > 1 && opt.credit * (n_nodes - 1) > opt.n_recv && rank == 0)
+		warnx("Router: credit %d over %d peers wants %d blocks in flight but n_recv gives %d send slots: "
+		      "the rate collapses above n_recv / peers", opt.credit, n_nodes - 1,
+		      opt.credit * (n_nodes - 1), opt.n_recv);
+
 	if (P < 1 || C < 1)
 		errx(1, "Router: a node needs at least one producer and one consumer (P=%d, C=%d)", P, C);
 
