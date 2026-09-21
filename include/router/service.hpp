@@ -505,7 +505,7 @@ inline bool Router_Test_quiescent(const Router_thread &rt)
  * tallies are read before its stamp, so a wait it closes in between is missed once rather than counted twice,
  * and a stamp later than the clock read here adds nothing rather than wrapping.
  */
-inline void Router_Stats(u64 *stats, const Router_thread &rt)
+inline void Router_Stats(const Router_thread &rt, u64 *stats)
 {
 	if (rt.role != ROUTER_SERVICE)
 		errx(1, "Router_Stats: not the service thread");
@@ -528,40 +528,6 @@ inline void Router_Stats(u64 *stats, const Router_thread &rt)
 		if (since != 0 && (int64_t) (now - since) > 0)
 			stats[ROUTER_WAIT_RECV] += now - since;
 	}
-}
-
-/*
- * Any thread.  What limits the flow, read off a Router_Stats array -- one node's, or the sum of several nodes',
- * ELAPSED being then summed as many times, so that the per-node counts below divide right: the share of the round
- * the producers spent without pushing -- waiting for a free block, or closed --, the consumers with nothing to pop
- * and the service in turns that moved something, each in [0, 1]; and the verdict.  "producers" when they never waited and the consumers did:
- * the points are produced too slowly.  "consumers" the other way round: they are consumed too slowly.
- * "service/network" when both waited for the Router: the blocks are in flight or in the service's hands, and
- * *busy says which -- near 1 the service's CPU, well below it the wire or the credit.  "balanced" when neither
- * waited.  Meaningful for a round long against its closure: the drain is consumer wait.
- */
-inline const char *Router_Bottleneck(const u64 *stats, const Router_thread &rt, double *send_wait,
-                                     double *recv_wait, double *busy)
-{
-	const Router_node &rn = rt.node;
-	double elapsed = (double) stats[ROUTER_ELAPSED];
-	*send_wait = 0;
-	*recv_wait = 0;
-	*busy = 0;
-	if (elapsed > 0) {
-		*send_wait = std::min(1., (double) stats[ROUTER_WAIT_SEND] / (rn.P * elapsed));
-		*recv_wait = std::min(1., (double) stats[ROUTER_WAIT_RECV] / (rn.C * elapsed));
-		*busy = std::min(1., (double) stats[ROUTER_BUSY] / elapsed);
-	}
-	bool producers_wait = *send_wait >= ROUTER_WAIT_THRESHOLD;
-	bool consumers_wait = *recv_wait >= ROUTER_WAIT_THRESHOLD;
-	if (producers_wait && consumers_wait)
-		return "service/network";
-	if (producers_wait)
-		return "consumers";
-	if (consumers_wait)
-		return "producers";
-	return "balanced";
 }
 
 /*

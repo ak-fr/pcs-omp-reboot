@@ -157,7 +157,7 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 		if (tid == 0) {
 			double elapsed = wtime() - t0;
 			u64 st[ROUTER_STATS_SIZE];
-			Router_Stats(st, rt);
+			Router_Stats(rt, st);
 			u64 tot[ROUTER_STATS_SIZE];
 			u64 xor_hash = 0;              /* every consumer's slot wrote before the barrier above */
 			for (int t = 0; t < n_threads; t++)
@@ -174,6 +174,7 @@ static void routed_benchmark(const Wrapper &wrapper, const Options &opts, int ra
 			}
 		}
 		Router_Reset(rt);
+		Router_Finalize(rt);
 	}
 }
 

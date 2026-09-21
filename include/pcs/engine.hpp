@@ -62,8 +62,46 @@ static void banner(const Wrapper &wrapper, const Params &params, u64 seed)
 	fflush(stdout);
 }
 
+static constexpr double WAIT_THRESHOLD = 0.05;   /* a role waiting less than this of the round is not waiting */
+
+/*
+ * What limits the flow, read off a Router_Stats array -- one node's, or the sum of several nodes', ELAPSED
+ * being then summed as many times, so that the per-node counts below divide right: the share of the round
+ * the producers spent without pushing -- waiting for a free block, or closed --, the consumers with nothing to
+ * pop and the service in turns that moved something, each in [0, 1]; and the verdict.  "producers" when they
+ * never waited and the consumers did: the points are produced too slowly.  "consumers" the other way round:
+ * they are consumed too slowly.  "service/network" when both waited for the Router: the blocks are in flight
+ * or in the service's hands, and *busy says which -- near 1 the service's CPU, well below it the wire or the
+ * credit.  "balanced" when neither waited.  Meaningful for a round long against its closure: the drain is
+ * consumer wait.
+ */
+static const char *bottleneck(const Router_thread &rt, const u64 *stats, double *send_wait, double *recv_wait,
+                              double *busy)
+{
+	const int P = Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE);
+	const int C = Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE);
+	double elapsed = (double) stats[ROUTER_ELAPSED];
+	*send_wait = 0;
+	*recv_wait = 0;
+	*busy = 0;
+	if (elapsed > 0) {
+		*send_wait = std::min(1., (double) stats[ROUTER_WAIT_SEND] / (P * elapsed));
+		*recv_wait = std::min(1., (double) stats[ROUTER_WAIT_RECV] / (C * elapsed));
+		*busy = std::min(1., (double) stats[ROUTER_BUSY] / elapsed);
+	}
+	bool producers_wait = *send_wait >= WAIT_THRESHOLD;
+	bool consumers_wait = *recv_wait >= WAIT_THRESHOLD;
+	if (producers_wait && consumers_wait)
+		return "service/network";
+	if (producers_wait)
+		return "consumers";
+	if (consumers_wait)
+		return "producers";
+	return "balanced";
+}
+
 /* the live one-line refresh, from the progress reports so far: rank 0's, and approximate on purpose; it ends
-   with the Router's verdict on what limits the round, from the same reports */
+   with the verdict on what limits the round, from the same reports */
 static void display(const Router_thread &rt, const Params &params, const u64 reported[], double delta, u64 nround)
 {
 	u64 ndp = reported[N_DP];
@@ -74,7 +112,7 @@ static void display(const Router_thread &rt, const Params &params, const u64 rep
 	double send_wait;                      /* share of the round the walkers waited for a block */
 	double recv_wait;                      /* share the dict threads had nothing to pop */
 	double busy;                           /* share the service spent in turns that moved something */
-	const char *limit = Router_Bottleneck(reported + REC_ROUTER, rt, &send_wait, &recv_wait, &busy);
+	const char *limit = bottleneck(rt, reported + REC_ROUTER, &send_wait, &recv_wait, &busy);
 	print("\rRound {}:  {:.1f}s ({:.1f}%, ETA {:.1f}s).  {:.2f}*w #DP.  {} #f/s per walker.  "
 	      "{} probe/s per dict thread.  node-->{}B/s.  wait: producers {:5.1f}% consumers {:5.1f}%, "
 	      "service {:5.1f}% busy --> {:<15}   ", nround + 1, delta, 100. * completion,
@@ -111,7 +149,7 @@ static void round_report(const Router_thread &rt, const Params &params, const u6
 	double send_wait;                      /* share of the round the walkers waited for a block */
 	double recv_wait;                      /* share the dict threads had nothing to pop */
 	double busy;                           /* share the service spent in turns that moved something */
-	const char *limit = Router_Bottleneck(r + REC_ROUTER, rt, &send_wait, &recv_wait, &busy);
+	const char *limit = bottleneck(rt, r + REC_ROUTER, &send_wait, &recv_wait, &busy);
 	print("            LIMITED BY {}:  producers waited {:.1f}% of the round, consumers {:.1f}%, the service was "
 	      "busy {:.1f}%\n", limit, 100. * send_wait, 100. * recv_wait, 100. * busy);
 
@@ -200,7 +238,7 @@ static void service_round(Router_thread &rt, const Params &params, Shared &share
 		turns += 1;
 		if ((turns & 0xff) != 0)
 			continue;
-		Router_Stats(stats, rt);
+		Router_Stats(rt, stats);
 		node_snapshot(shared, stats, cur);
 		control.service(cur, shared);
 		if (not params.verbose)
@@ -211,7 +249,7 @@ static void service_round(Router_thread &rt, const Params &params, Shared &share
 		control.last_display = now;
 		display(rt, params, control.reported, now - control.round_start, shared.nround);
 	}
-	Router_Stats(stats, rt);                       /* Router_Reset would clear them */
+	Router_Stats(rt, stats);                       /* Router_Reset would clear them */
 	node_snapshot(shared, stats, cur);
 	control.service(cur, shared);                  /* the last turn: rank 0 drains the round's reports */
 }
@@ -408,6 +446,7 @@ optional<tuple<u64,u64,u64>> run(const Wrapper &wrapper, u64 nbytes_memory, cons
 		}
 		if (role == ROUTER_SERVICE)
 			control->shutdown();
+		Router_Finalize(rt);           /* every thread is out of the Router before any handle dies */
 	}
 
 	if (params.verbose)

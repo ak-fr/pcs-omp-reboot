@@ -130,7 +130,7 @@ static void check_round(const Router_thread &rt, const RouterArgs &a, Shared &sh
 	int S = a.producers;
 	int R = a.consumers;
 	u64 st[ROUTER_STATS_SIZE];
-	Router_Stats(st, rt);
+	Router_Stats(rt, st);
 
 	std::vector<u64> node_sent(F, 0);
 	for (int s = 0; s < S; s++)
@@ -167,7 +167,7 @@ static void check_round(const Router_thread &rt, const RouterArgs &a, Shared &sh
 	double send_wait;                        /* share of the round the producers waited for a block */
 	double recv_wait;                        /* share the consumers had nothing to pop */
 	double busy;                             /* share the service spent in turns that moved something */
-	const char *limit = Router_Bottleneck(tot, rt, &send_wait, &recv_wait, &busy);
+	const char *limit = bottleneck(rt, tot, &send_wait, &recv_wait, &busy);
 	if (a.check_limit) {                     /* dawdling consumers over an exhausted pool: the producers wait */
 		CHECK(send_wait > 0.5);
 		CHECK(strcmp(limit, "consumers") == 0);
@@ -276,6 +276,7 @@ static void run_config(const RouterArgs &a, const char *name)
 				check_round(rt, a, sh, round);
 			Router_Reset(rt);
 		}
+		Router_Finalize(rt);
 	}
 }
 

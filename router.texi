@@ -1,0 +1,343 @@
+\input texinfo
+@c %**start of header
+@setfilename router_alt.info
+@settitle Point router Manual
+@iftex
+@afourpaper
+@end iftex
+@comment %**end of header
+
+@copying
+@noindent Both the code of the library and this manual are in the public domain.
+@end copying
+
+
+@iftex
+@titlepage
+@title The MitM point router
+
+@author by Ahmed Alharbi and Charles Bouillaguet 
+@email{ahmed.alharbi@@lip6.fr and charles.bouillaguet@@lip6.fr}
+
+@tex
+\global\parindent=0pt
+\global\parskip=8pt
+\global\baselineskip=13pt
+@end tex
+
+@page
+@vskip 0pt plus 1filll
+@end iftex
+
+@insertcopying
+@ifnottex
+@sp 1
+@end ifnottex
+
+@iftex
+@end titlepage
+@headings double
+@end iftex
+
+@node Top
+@top BeanPolE
+
+@insertcopying
+
+@menu
+* Introduction::                        Preliminary information.
+* Setup and termination::               Everything has a beginning, a life and an end.
+* Accessors::                           Function to query the state of the router.
+* Producer threads::                    Functions to send items.
+* Consumer threads::                    Functions to receive items.
+* Service thread::                      Functions to make the router work.
+* Thread placement and pinning::        What the router does to your thread team.
+* Performance counters::                Monitor what's going on.
+* Tuning and advanced tweaking::        For users who really know what they are doing.
+
+@end menu
+
+@node Introduction
+@comment  node-name,  next,  previous,  up
+@chapter Introduction
+@cindex Introduction
+
+The router is a C++ library (about 2K lines of code) that helps writing meet-in-the-middle cryptographic attacks. 
+
+@noindent Here is what everybody must know to use it:
+
+@itemize @bullet
+@item The router manages a collection of nodes each hosting several threads.
+@item It is built on top of MPI, OpenMP and hwloc.
+@item The user is responsible for creating an OpenMP @dfn{thread team} prior to invoking router functions.
+@item A @dfn{node} is a single MPI rank. The router makes no assumptions about a mapping between MPI ranks and physical hosts. However, the most common use case is a single MPI rank per host (but see @ref{Tuning and advanced tweaking} for exceptions).
+@item The router requires the MPI implementation to be initialized with @code{MPI_Init_thread}. It must provide the @code{MPI_THREAD_FUNNELED} thread support level.
+@item The main thread of each node is the @dfn{service thread}. It is (mostly) occupied by the router.
+@item Other threads are either @dfn{producer} threads or @dfn{consumer} threads. Each thread choses its role when the router is initialized. It is fixed for the lifetime of the router.
+@item All nodes have the @emph{same number} of producer and consumer threads.
+@item Consumer threads are globally numbered sequentially (0, 1, 2, ...). The position of a thread in the sequence is its @dfn{rank}.
+@item The router moves @dfn{items}, namely pairs of 64-bit integers (but note that the library could be altered to move different kind of objects).
+@item Producers may @dfn{push} an item to the @dfn{inbox} of a designated consumer.
+@item Consumers may @dfn{pop} an item from their inbox (assuming there is any).
+@item Items are delivered exactly once by the router (not lost, not duplicated).
+@item No other guarantees are offered on the order in which items are delivered.
+@item A producer may @dfn{close} the channel to indicate that it will not push items anymore.
+@item A consumer is @dfn{drained} when its inbox is empty and cannot receive any new item (producers are closed and pending buffers have been delivered).
+@item The router is @dfn{quiescent} when all consumers are drained.
+@item Most router functions are @dfn{local}: they return immediately, independently of the state of other threads.
+@item A few operations are @dfn{blocking}: they may hang for an undetermined amount of time until some other thread progresses.
+@item A few functions are @dfn{collective}: they are blocking and must be called by @emph{all} threads of all nodes simultaneously (they may contain OpenMP and MPI barriers).
+@item Some functions are specific to producer/consumer/service threads and must not be called by other threads.
+@item Each thread must @dfn{finalize} the router before its @code{Router_thread} object is destroyed, and calls no router function afterwards.
+@end itemize
+
+@noindent All functions are thread-safe. 
+
+@noindent The router has been designed with the objective of shielding the actual users from the nasty low-levels details of the underlying hardware, while aiming at minimum overhead under maximum throughput (under "normal" conditions).
+
+
+@node Setup and termination
+@chapter Setup and termination
+
+
+@deftypefun Router_thread Router_Init(int @var{role}, MPI_Comm @var{comm}, int @var{tag}, const struct Router_Opts *@var{opts})
+Start the router and return an opaque handle (the a @code{Router_thread} object) that the calling thread must provide in all subsequent function calls. 
+
+This is a collective operation: all threads of all nodes must call this function simultaneously.
+
+The @var{role} argument can be @code{ROUTER_PRODUCER} or @code{ROUTER_CONSUMER} to indicate the desired role of this thread. Note that the "main" thread (the one that spawned the OpenMP thread team) is automatically the service thread (and ignores the @var{role} argument). 
+
+The router operates on the MPI communicator given in @var{comm} (can be @code{MPI_COMM_WORLD} or a sub-communicator). It only sends MPI messages of tag @var{tag} on it, and performs blocking collective operations.
+
+Some internals of the router can be fine-tuned by passing @dfn{options} (see @ref{Tuning and advanced tweaking} for more details). Pass @code{ROUTER_DEFAULT_OPTS} to use the default.
+@end deftypefun
+
+Note that nothing else must send MPI messages of tag @var{tag} on the communicator @var{comm}, as they may get caught inadvertently by the router.
+
+@deftypefun void Router_Finalize(Router_thread &@var{rt})
+Leave the router: the calling thread will invoke no router function anymore. This is a collective operation.
+@end deftypefun
+
+The @code{Router_thread} object holds the router's internal state of the current thread. It is passed as argument to all other functions. A thread @strong{must} call @code{Router_Finalize} before its @code{Router_thread} object goes out of scope. @code{Router_Finalize} also checks that the calling thread left the router clean, and halts the process with an error otherwise:
+@itemize @bullet
+@item a producer that pushed at least one item must have closed;
+@item a consumer that has received at least one item must be drained;
+@item the router must be quiescent, unless it was never used.
+@end itemize
+
+@deftypefun void Router_Reset(Router_thread &@var{rt})
+Resets the router to its initial state: producers are reopened and consumers are not drained. This is a collective operation. The router must be quiescent before this function is invoked. This also resets the performance counters (@xref{Performance counters}).
+@end deftypefun
+
+
+
+@node Accessors
+@chapter Accessors
+
+@deftypefun int Router_size(const Router_thread &@var{rt}, int @var{role}, int @var{scope})
+Return the number of threads with the given @var{role} in the given @var{scope}.
+
+@var{role} can be either @code{ROUTER_PRODUCER} or @code{ROUTER_CONSUMER}.
+
+@var{scope} can be either @code{ROUTER_GLOBAL} (all threads on all nodes) or @code{ROUTER_NODE} (threads on this node only).
+@end deftypefun
+
+
+@deftypefun int Router_rank(const Router_thread &@var{rt}, int @var{scope})
+Return the rank of this thread among its peers of the same role in the given @var{scope}.
+@end deftypefun
+
+
+
+@node Producer threads
+@chapter Producer threads
+
+@deftypefun void Router_Push(u64 @var{a}, u64 @var{b}, int @var{dest}, Router_thread &@var{rt})
+Send the item (@var{a}, @var{b}) to the consumer with rank @var{dest}. Blocking (may hang until delivery becomes possible).
+@end deftypefun
+
+@deftypefun void Router_Close(Router_thread &@var{rt})
+Close this producer. It will no longer call @code{Router_Push}. This is a local operation.
+@end deftypefun
+
+If it does not block, @code{Router_Push} usually returns in about 20 CPU cycle on current hardware. There is no validation of the @var{dest} argument (bad values will cause undefined behavior).
+
+All producer threads that pushed at least one item must be closed before their @code{Router_thread} object goes out of scope.
+
+
+@node Consumer threads
+@chapter Consumer threads
+
+@deftypefun bool Router_Pop(u64 *@var{a}, u64 *@var{b}, Router_thread &@var{rt})
+Pops the next item in this thread's inbox, write it in (@var{a}, @var{b}) then return @code{true}. 
+Return @code{false} when the inbox is empty. This is a local operation.
+@end deftypefun
+
+
+@deftypefun bool Router_Test_drained(Router_thread &@var{rt})
+Returns @code{true} when the calling thread is drained. This is a local operation.
+@end deftypefun
+
+It's OK to call @code{Router_Pop} a tight loop ("spinning") while it returns @code{false}.
+
+@quotation
+@strong{Rationale}: it does not perform any serializing memory accesses so it won't stall other threads.
+@end quotation
+
+When a consumer thread is drained, then  no new items can be delivered anymore
+and this thread has processed all the ones sent to it. A consumer thread must
+be drained before it calls @code{Router_Finalize}.
+
+A consumer thread only switches to the "drained" state after executing a @code{Router_Pop} operation that returned @code{false}.
+
+@quotation
+@strong{Rationale}: this is what releases internal buffers owned by the consumer threads.
+@end quotation
+
+
+@node Service thread
+@chapter Service thread
+
+Each node has a single service thread (thread #0). 
+
+@deftypefun void Router_Progress(Router_thread &@var{rt})
+Move items between threads of this node, and to/from the other nodes. This is a local operation.
+@end deftypefun
+
+
+@deftypefun bool Router_Test_quiescent(const Router_thread &@var{rt})
+Return @code{true} when the router is quiescent, namely when all producers are closed and all consumers drained.
+@end deftypefun
+
+When the router is quiescent, no new item has to be moved. The  service thread must call @code{Router_Progress} in a loop until the router becomes quiescent. @code{Router_Progress} is non-blocking: it terminates in a bounded amount of time, whatever the situation is. This allows the service thread to perform some other duties.
+
+
+@node Thread placement and pinning
+@chapter Thread placement and pinning
+
+For performance reasons, the router decides to place the threads on specific CPUs and @dfn{pins} them in @code{Router_Init}. This fails loudly if pinning is impossible. It is possible to disable thread pinning (@xref{Tuning and advanced tweaking}).
+
+@quotation
+@strong{Rationale}: in the targeted applications, producers and consumers have a different memory access pattern, so that "spreading" both kind uniformly accross the machine may improve performance.
+@end quotation
+
+The router detects the memory hierarchy of the hardware (using the @samp{hlwoc}
+library). The placement rules aim at "spreading" producers and consumers
+uniformly among NUMA nodes, cache domains and cores. They are as follows:
+@itemize @bullet
+@item The service thread runs alone on the first physical core of the first NUMA domain.
+@item Consumers are placed first, and producers afterwards.
+@item The next thread is placed on the least filled NUMA node, then inside it on the least-filled cache domain, then inside it on the least filled @dots{}, then inside it on the least filled core. Ties are broken by lowest index first at all levels. 
+@end itemize
+
+It is possible to inspect the placement using:
+
+@deftypefun int Router_closeness(const Router_thread &@var{rt}, int @var{role}, int @var{index})
+Returns the affinity level of the calling thread with the specified thread. Higher means "more affine". This returns the depth of the deepest object of the machine's hierarchy holding both their CPUs: 0 the whole machine (always when threads are not pinned), larger closer. The maximum affinity is with the calling thread itself.
+@end deftypefun
+
+
+@node Performance counters
+@chapter Performance counters
+
+The router maintains some performance counters that be accessed by the service thread.
+
+@deftypefun void Router_Stats(const Router_thread &@var{rt}, u64 *@var{stats})
+Writes the performance counters in @var{stats}, that must be a preallocated array of size at least @code{ROUTER_STATS_SIZE}.
+@end deftypefun
+
+The performance counters are per node, summed over the threads of the node. They are precise only when the router is quiescent. Otherwise they can be approximate.
+
+@quotation
+@strong{Rationale}: each thread maintains private performance counters, and updates them without explicit synchronization with the service thread for performance reasons. When the router is live, the service thread may therefore see a somewhat outdated view of each thread's private counters when performing the aggregation over all threads.
+@end quotation
+
+@code{Router_Reset} resets the performance counters.
+
+To access a performance counter, just read @code{@var{stats}[x]}, where @code{x} is one of the names described below.
+
+@quotation
+@strong{Rationale}: this data structure was preferred to a @code{struct} with named members, because it allows for easier cross-node aggregation using @code{MPI_Reduce}.
+@end quotation
+
+The events measured by some of the performance counters are described in more details in @ref{Tuning and advanced tweaking}.
+
+Performance counters:
+
+@vtable @samp
+@item ROUTER_PUSHED
+Items pushed by the producers of this node (calls to @code{Router_Push}).
+
+@item ROUTER_POPPED
+Items popped by the consumers of this node (calls to @code{Router_Pop}).
+
+@item ROUTER_TURNS
+Calls to @code{Router_Progress} in this round.
+
+@item ROUTER_IDLE_TURNS
+Calls to @code{Router_Progress} that resulted in no change to the state of the router.
+
+@item ROUTER_BLOCKS
+Memory blocks returned to the free pool.
+
+@item ROUTER_STALL_OUT
+Number of times a complete block found no room at its destination and had to be parked by the service thread: the consumer's inbox was full, or no MPI send slot was free, or the destination node already had its @var{credit} of blocks in flight. Counted once per parking, however long the block stays parked.
+
+@item ROUTER_STALL_IN
+Number of times the service thread could not repost an MPI receive for want of a free block. The reposting is retried at every turn, so a node starved of blocks accumulates roughly one per turn. 
+@end vtable
+
+Byte counts:
+
+@vtable @samp
+@item ROUTER_BYTES_SENT
+Bytes of the MPI messages sent.
+
+@item ROUTER_BYTES_RECV
+Bytes of the MPI messages received.
+@end vtable
+
+Wall-clock time counts (in nanoseconds):
+
+@vtable @samp
+@item ROUTER_ELAPSED
+Time from the first call to @code{Router_Progress} of the round to the call to @code{Router_Stats}.
+
+@item ROUTER_WAIT_SEND
+Time the producers spent blocked, summed over the producers of the node. Include the time elapsed since the threads closed.
+
+@item ROUTER_WAIT_RECV
+Time the consumers spent with an empty inbox, summed over the consumers of the node. The drain at the end of the round counts as consumer wait.
+
+@item ROUTER_BUSY
+Time the service thread spent in turns that moved something. A turn is charged the whole interval since the end of the previous turn, so whatever the service thread does between two calls to @code{Router_Progress} is counted as the router's.
+@end vtable
+
+Network flow can be obtained by dividing the @samp{ROUTER_BYTES_SENT} counter by @samp{ROUTER_ELAPSED}.
+
+The waiting times can be used to determine if there is an obstruction to the item flow in the router. Basically, if both producers and consumers wait, then either the network or the service thread is a bottleneck. If producers wait but not consumers (or the opposite) then the ratio of producers to consumer threads should be changed.
+
+@node Tuning and advanced tweaking
+@chapter Tuning and advanced tweaking
+
+
+@verbatim
+/* every field has a working default; every node must supply the same values */
+struct Router_Opts {
+        size_t block_points = 16384;        /* points per block, a power of two >= 4: one block is one message */
+        size_t swc_linesize = 0;            /* points per private write-combining line, 4..block_points; 0 == auto */
+        int n_recv = 0;                     /* always-posted MPI_Irecv(ANY_SOURCE) slots, and as many send slots;
+                                               0 == auto: two a peer, at least 16 */
+        int inbox_blocks = 64;              /* a consumer's inbox, in blocks */
+        int credit = 2;                     /* blocks in flight to one peer at most: a stalled peer hogs no send slot.
+                                               Two in flight is what saturates a link; more is useless, and more
+                                               than n_recv / peers collapses the rate */
+        bool pin = true;                    /* pin the threads, or leave the CPUs to the caller */
+        bool verbose = true;                /* rank 0 prints the sizes once connected */
+};
+@end verbatim
+
+
+
+
+@bye

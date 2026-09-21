@@ -2,6 +2,7 @@
 #define MITM_ROUTER_CONNECT
 
 #include "common.hpp"
+#include "workers.hpp"                /* Router_Finalize asks a consumer the same question Router_Test_drained does */
 
 namespace mitm {
 
@@ -27,10 +28,16 @@ inline Router_thread::Router_thread(int role_, int index_, int cpu_, Router_node
 		rn.plan.report_measured();
 }
 
-/* Thread 0's object owns the node.  The team's objects die in any order at the end of the region: a worker's
- * never touches the node here, and the node never touches a worker's. */
+/* Thread 0's object owns the node.  The team's objects die in any order at the end of the region -- a worker's
+ * never touches the node here, and the node never touches a worker's -- which is sound only because every thread
+ * has left the Router by then: a handle destroyed without Router_Finalize halts the process, since the thread
+ * that skipped it may still be reading a node another thread's destructor has deleted. */
 inline Router_thread::~Router_thread()
 {
+	if (not finalized) {
+		const char *what = role == ROUTER_SERVICE ? "service" : (role == ROUTER_PRODUCER ? "producer" : "consumer");
+		errx(1, "Router: the %s thread's handle was destroyed without Router_Finalize", what);
+	}
 	::free(swc);
 	if (role == ROUTER_SERVICE)
 		delete &node;
@@ -49,13 +56,10 @@ inline Router_node::Router_node(int n_threads, MPI_Comm mpi_comm, int tag_, cons
 	masks.assign(n_threads, cpu_set_t());
 }
 
-/* Reached from thread 0's ~Router_thread, at the end of the region: only when nothing of ours is in flight, i.e.
- * quiescent or never used.  The workers' objects may be gone by now: nothing of theirs is read. */
+/* Reached from thread 0's ~Router_thread, at the end of the region, and only past Router_Finalize, which checked
+ * that nothing of ours was in flight.  The workers' objects may be gone by now: nothing of theirs is read. */
 inline Router_node::~Router_node()
 {
-	bool idle = phase == ROUTER_OPEN && ctr[ROUTER_BLOCKS] == 0 && ctr[ROUTER_MSGS_SENT] == 0;
-	if (not quiescent && not idle)
-		errx(1, "Router: destroyed while not quiescent");
 	for (size_t k = 0; k < in_req.size(); k++)
 		if (in_req[k] != MPI_REQUEST_NULL) {
 			MPI_Cancel(&in_req[k]);
@@ -339,6 +343,40 @@ inline void Router_node::banner() const
 		if (rn->roles[t] == mine)
 			index += 1;
 	return Router_thread(mine, index, (int) cpu, *rn);   /* registers itself, then holds the team's last barrier */
+}
+
+/*
+ * Collective over the team, the last call every thread makes on its handle: each thread declares it is out of the
+ * Router, and the barrier makes that true of every other before any of them returns, so that no thread reads the
+ * node after the service thread's handle has deleted it -- which is what the caller has no other way of ensuring,
+ * a consumer's Router_Test_drained reading the node.  Each thread also answers for its end of the round.  A
+ * producer answers before the barrier, for its own flag: it closed what it pushed.  A consumer answers after it,
+ * where the node is final and the question can be Router_Test_drained itself rather than a guess made while the
+ * service still runs.  The service answers after a second barrier, once the workers have named themselves: the
+ * node is quiescent, or was never used.  A consumer the service handed nothing this round is not asked at all,
+ * which is what lets "reset, then finalize" pass: a fresh round has closed no input, so nobody is drained yet.
+ * Nothing of the Router may be called on this thread afterwards; the handle may then die.
+ */
+inline void Router_Finalize(Router_thread &rt)
+{
+	Router_node &rn = rt.node;
+	if (rt.finalized)
+		errx(1, "Router_Finalize: called twice on the same thread");
+	if (rt.role == ROUTER_PRODUCER && rt.ctr[ROUTER_PUSHED] > 0 && rt.closed.load_acquire() == 0)
+		errx(1, "Router_Finalize: producer %d pushed %" PRIu64 " point(s) and never called Router_Close",
+		     rt.index, rt.ctr[ROUTER_PUSHED]);
+	#pragma omp barrier                   /* every thread is out of the Router: the node's state changes no more */
+	if (rt.role == ROUTER_CONSUMER && rn.inbox_pushed[rt.index] > 0 && not Router_Test_drained(rt))
+		errx(1, "Router_Finalize: consumer %d is not drained: of the %" PRIu64 " block(s) the service handed it,"
+		        " it read through %" PRIu64 "%s", rt.index, rn.inbox_pushed[rt.index], rt.ctr[ROUTER_BLOCKS],
+		     rn.input_closed.load_acquire() ? "" : ", and the round was still open");
+	#pragma omp barrier                   /* every worker has answered for itself: what is left is the node's */
+	if (rt.role == ROUTER_SERVICE) {
+		bool idle = rn.phase == ROUTER_OPEN && rn.ctr[ROUTER_BLOCKS] == 0 && rn.ctr[ROUTER_MSGS_SENT] == 0;
+		if (not rn.quiescent && not idle)
+			errx(1, "Router_Finalize: the router is not quiescent");
+	}
+	rt.finalized = true;
 }
 
 /*

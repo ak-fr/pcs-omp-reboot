@@ -30,7 +30,7 @@ namespace mitm {
 /* Router_size's and Router_rank's `scope`: over every node of the team, or this node alone */
 enum router_scope { ROUTER_GLOBAL = 0, ROUTER_NODE = 1 };
 
-/* Router_Stats layout: counts, then four times in nanoseconds, what Router_Bottleneck reads */
+/* Router_Stats layout: counts, then four times in nanoseconds, the caller's to interpret */
 enum router_stat {
 	ROUTER_PUSHED, ROUTER_POPPED, ROUTER_SENT, ROUTER_RECV, ROUTER_LOCAL,
 	ROUTER_MSGS_SENT, ROUTER_MSGS_RECV, ROUTER_BYTES_SENT, ROUTER_BYTES_RECV, ROUTER_BLOCKS,
@@ -64,7 +64,6 @@ static constexpr size_t ROUTER_HDR_BYTES = 64;    /* a block's header slot: the 
 static constexpr size_t ROUTER_DEST_WORDS = 8;    /* u64 words per destination: its two words fill one cache line */
 static constexpr u32 ROUTER_MAX_L = 4096;         /* lines per block at most */
 static constexpr u32 ROUTER_BATCH = 32;           /* blocks off the free ring at a time: a producer's cache, the stash */
-static constexpr double ROUTER_WAIT_THRESHOLD = 0.05;   /* Router_Bottleneck: a role waiting less of the round is not waiting */
 
 enum router_kind { ROUTER_DATA = 0, ROUTER_END = 1 };
 
@@ -160,6 +159,7 @@ struct alignas(64) Router_thread {
 	u32 cur_off = 0;                     /* Router_Pop's cursor into it */
 	/* both workers': the wait under way, which Router_Stats adds to a snapshot before its owner tallies it */
 	u64 wait_since = 0;                  /* wtime() in ns when the wait for the Router began, or the producer closed; 0 == none */
+	bool finalized = false;              /* Router_Finalize has run on this thread: nothing of the Router may be read any more */
 
 	Router_thread(int role, int index, int cpu, Router_node &rn);
 	~Router_thread();

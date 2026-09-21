@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <algorithm>
 #include <err.h>
 
 #include "router/router.hpp"
@@ -31,6 +32,44 @@ struct RouterArgs {
 	bool local_only = false;         /* bench: every destination on the producer's node */
 	std::string test = "all";
 };
+
+static constexpr double WAIT_THRESHOLD = 0.05;   /* a role waiting less than this of the round is not waiting */
+
+/*
+ * What limits the flow, read off a Router_Stats array -- one node's, or the sum of several nodes', ELAPSED
+ * being then summed as many times, so that the per-node counts below divide right: the share of the round
+ * the producers spent without pushing -- waiting for a free block, or closed --, the consumers with nothing to
+ * pop and the service in turns that moved something, each in [0, 1]; and the verdict.  "producers" when they
+ * never waited and the consumers did: the points are produced too slowly.  "consumers" the other way round:
+ * they are consumed too slowly.  "service/network" when both waited for the Router: the blocks are in flight
+ * or in the service's hands, and *busy says which -- near 1 the service's CPU, well below it the wire or the
+ * credit.  "balanced" when neither waited.  Meaningful for a round long against its closure: the drain is
+ * consumer wait.
+ */
+static const char *bottleneck(const Router_thread &rt, const u64 *stats, double *send_wait, double *recv_wait,
+                              double *busy)
+{
+	const int P = Router_size(rt, ROUTER_PRODUCER, ROUTER_NODE);
+	const int C = Router_size(rt, ROUTER_CONSUMER, ROUTER_NODE);
+	double elapsed = (double) stats[ROUTER_ELAPSED];
+	*send_wait = 0;
+	*recv_wait = 0;
+	*busy = 0;
+	if (elapsed > 0) {
+		*send_wait = std::min(1., (double) stats[ROUTER_WAIT_SEND] / (P * elapsed));
+		*recv_wait = std::min(1., (double) stats[ROUTER_WAIT_RECV] / (C * elapsed));
+		*busy = std::min(1., (double) stats[ROUTER_BUSY] / elapsed);
+	}
+	bool producers_wait = *send_wait >= WAIT_THRESHOLD;
+	bool consumers_wait = *recv_wait >= WAIT_THRESHOLD;
+	if (producers_wait && consumers_wait)
+		return "service/network";
+	if (producers_wait)
+		return "consumers";
+	if (consumers_wait)
+		return "producers";
+	return "balanced";
+}
 
 static void router_usage()
 {

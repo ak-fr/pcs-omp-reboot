@@ -137,7 +137,7 @@ static void bench_consumer(Router_thread &rt)
 static void bench_report(const Router_thread &rt, const RouterArgs &a, int round, double elapsed)
 {
 	u64 st[ROUTER_STATS_SIZE];
-	Router_Stats(st, rt);
+	Router_Stats(rt, st);
 	double mine[3] = {(double) st[ROUTER_PUSHED] / elapsed, 0, elapsed};
 	for (int s = 0; s < a.producers; s++)
 		mine[1] += ns_per_point[s] / a.producers;
@@ -158,7 +158,7 @@ static void bench_report(const Router_thread &rt, const RouterArgs &a, int round
 	double send_wait;                   /* share of the round the producers waited for a block, over the nodes */
 	double recv_wait;                   /* share the consumers had nothing to pop */
 	double busy;                        /* share the service threads spent in turns that moved something */
-	const char *limit = Router_Bottleneck(tot, rt, &send_wait, &recv_wait, &busy);
+	const char *limit = bottleneck(rt, tot, &send_wait, &recv_wait, &busy);
 	fmt::print("round {}: {:.2f}s | routed {} pts/s | per node: push {}/s ({:.0f}-{:.0f} M/s) pop {}/s "
 	           "net {} pts/s {:.2f} GB/s {} msgs/s {} blocks/s | {:.1f} ns/point | producers wait {:.0f}% "
 	           "consumers {:.0f}% service {:.0f}% busy --> {} ({} turns/s) | xor {:016x}\n",
@@ -222,6 +222,7 @@ int main(int argc, char **argv)
 				bench_report(rt, a, round, wtime() - t0);
 			Router_Reset(rt);
 		}
+		Router_Finalize(rt);
 	}
 	MPI_Finalize();
 	return EXIT_SUCCESS;

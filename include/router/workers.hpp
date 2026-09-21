@@ -223,7 +223,6 @@ inline bool Router_node::grab(Router_thread &r)
 	r.cur_count = e.count;
 	r.cur_pts = (const u64 *) (pool + (size_t) r.cur_blk * block_bytes + ROUTER_HDR_BYTES);
 	r.cur_off = 0;
-	r.ctr[ROUTER_POPPED] += r.cur_count;
 	return true;
 }
 
@@ -248,6 +247,7 @@ inline bool Router_Pop(u64 *a, u64 *b, Router_thread &rt)
 	*a = rt.cur_pts[2 * rt.cur_off];
 	*b = rt.cur_pts[2 * rt.cur_off + 1];
 	rt.cur_off += 1;
+	rt.ctr[ROUTER_POPPED] += 1;
 	if (rt.cur_off == rt.cur_count)
 		rt.node.release(rt);
 	return true;
