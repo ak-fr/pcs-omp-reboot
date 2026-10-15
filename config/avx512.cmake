@@ -7,7 +7,7 @@ try_run(avx512_runs avx512_compiles
     ${PROJECT_BINARY_DIR}/config
     ${PROJECT_SOURCE_DIR}/config/avx512.c)
 if(avx512_compiles)
-    if (avx52_runs MATCHES FAILED_TO_RUN)
+    if (avx512_runs MATCHES FAILED_TO_RUN)
         message(STATUS "Testing whether AVX-512 code can be used -- No (compiles but does not run)")
         else()
             message(STATUS "Testing whether AVX-512 code can be used -- Yes")

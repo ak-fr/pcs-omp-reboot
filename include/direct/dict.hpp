@@ -25,6 +25,11 @@ using std::vector;
 /* the page these mappings ask for: the kernel rounds a MAP_HUGETLB length up to it, munmap does not */
 static constexpr size_t HUGE_PAGE = 2 * 1024 * 1024;
 
+/* glibc < 2.36 defines MAP_HUGE_SHIFT but not the sizes, which only <linux/mman.h> has: log2(2 MB) == 21 */
+#ifndef MAP_HUGE_2MB
+#define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
+#endif
+
 /*
  * Map `nbytes` of zeroed memory for a shard: 2 MB pages when the kernel has some reserved, ordinary ones
  * otherwise, `why` saying why MAP_HUGETLB was refused, 0 if it was not.  No MAP_LOCKED: the kernel clears
